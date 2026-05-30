@@ -20,10 +20,10 @@ embeddings = HuggingFaceEmbeddings(
 )
 
 def parse_first_timestamp(text: str) -> str:
-    """Find the first timestamp in the format [MM:SS] within the text chunk."""
-    match = re.search(r'\[(\d{2}):(\d{2})\]', text)
+    """Find the first timestamp in the format [M:SS] or [MM:SS] within the text chunk and normalize to MM:SS."""
+    match = re.search(r'\[(\d+):(\d{2})\]', text)
     if match:
-        return f"{match.group(1)}:{match.group(2)}"
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
     return "00:00"
 
 def get_chroma_client() -> Chroma:

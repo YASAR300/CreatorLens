@@ -1,8 +1,8 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.services.scraper import scrape_youtube_metadata, scrape_instagram_metadata
-from app.services.transcriber import get_video_transcript
+from services.youtube_service import get_youtube_data
+from services.instagram_service import get_instagram_data
 from app.services.vector_store import store_transcript_in_db
 from app.services.rag_chain import rag_manager
 
@@ -36,28 +36,20 @@ async def ingest_videos(payload: IngestRequest):
     try:
         # Step 1: Scrape YouTube metadata & transcript
         logger.info("Processing YouTube Video A...")
-        meta_a = scrape_youtube_metadata(payload.youtube_url)
-        
-        # If YouTube transcript failed to load from subtitles, run Whisper fallback
-        if not meta_a["transcript"]:
-            logger.info("No subtitle available for YouTube. Transcribing audio via Groq Whisper...")
-            meta_a["transcript"] = get_video_transcript(
-                payload.youtube_url, 
-                platform="youtube", 
-                title=meta_a["title"]
-            )
+        meta_a = get_youtube_data(payload.youtube_url)
             
-        # Step 2: Scrape Instagram Reels metadata
+        # Step 2: Scrape Instagram Reels metadata & transcript
         logger.info("Processing Instagram Reel Video B...")
-        meta_b = scrape_instagram_metadata(payload.instagram_url)
+        meta_b = get_instagram_data(payload.instagram_url)
         
-        # For Instagram Reels, always transcribe audio using Whisper
-        logger.info("Transcribing Instagram Reel audio via Groq Whisper...")
-        meta_b["transcript"] = get_video_transcript(
-            payload.instagram_url, 
-            platform="instagram", 
-            title=meta_b["title"]
-        )
+        # Backwards compatibility mappings for RAG and Frontend
+        meta_a["follower_count"] = meta_a.get("subscriber_count", 0)
+        meta_a["hashtags"] = meta_a.get("tags", [])
+        meta_a["thumbnail"] = meta_a.get("thumbnail_url", "")
+        
+        meta_b["follower_count"] = meta_b.get("subscriber_count", 0)
+        meta_b["hashtags"] = meta_b.get("tags", [])
+        meta_b["thumbnail"] = meta_b.get("thumbnail_url", "")
 
         # Step 3: Clear any existing database/memory before storing new URLs
         logger.info("Resetting existing RAG database & session memory for fresh ingestion...")

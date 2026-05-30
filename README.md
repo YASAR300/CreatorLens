@@ -34,7 +34,7 @@ CreatorLens implements a robust 7-layer architecture designed for high-performan
 3. **Audio Extraction & Whisper Transcribing**: Uses `yt-dlp` to pull Instagram Reel audio tracks, transcribing them asynchronously via Groq's super-fast Whisper API (`whisper-large-v3`).
 4. **Local Vector Embeddings**: Uses LangChain and `sentence-transformers/all-MiniLM-L6-v2` locally to split the transcripts into semantic chunks (500 characters, 50 overlap) and embed them into 384-dimensional vectors.
 5. **ChromaDB Vector Store**: Persists documents locally under `backend/chroma_db` tagged with metadata like `video_id` (`A` or `B`) and `timestamp`.
-6. **Streaming RAG Orchestration**: Integrates LangChain with `ConversationBufferWindowMemory` (retains the past 5 turns) and Groq's Llama 3.1 70B model to generate strategic creator suggestions with exact inline citations (e.g. `[Video A, 01:15]`).
+6. **Streaming RAG Orchestration**: Integrates LangChain with `ConversationBufferWindowMemory` (retains the past 5 turns) and Groq's Llama 3.3 70B model to generate strategic creator suggestions with exact inline citations (e.g. `[Video A, 01:15]`).
 7. **Server-Sent Events (SSE)**: Streams responses chunk-by-chunk to the frontend in standard SSE JSON frames.
 
 ---
@@ -47,7 +47,7 @@ As a senior backend and AI architect, this stack is selected specifically to min
 
 | Infrastructure Component | Tech Choice | Pricing Model | Cost at 1,000 active creators/day |
 | :--- | :--- | :--- | :--- |
-| **LLM Inference** | Groq Llama 3.1 70B | Free Tier (or $0.59 / Million Tokens retail) | **~$6.00 / day** (assuming 5 long queries/user) |
+| **LLM Inference** | Groq Llama 3.3 70B | Free Tier (or $0.59 / Million Tokens retail) | **~$6.00 / day** (assuming 5 long queries/user) |
 | **Embeddings** | local all-MiniLM-L6-v2 | Locally hosted on server (0 API keys) | **$0.00** |
 | **Vector DB** | ChromaDB (Migrates to Qdrant) | Local SQLite instance (or Qdrant Free Tier) | **$0.00** |
 | **Instagram Scraping** | `instaloader` + `yt-dlp` | Direct connection requests | **$0.00** |

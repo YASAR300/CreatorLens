@@ -119,9 +119,9 @@ class RAGManager:
 
         # Step 4: Stream response from ChatGroq
         try:
-            logger.info("Initializing ChatGroq (Llama-3.1-70b-versatile)...")
+            logger.info("Initializing ChatGroq (Llama-3.3-70b-versatile)...")
             llm = ChatGroq(
-                model_name="llama-3.1-70b-versatile",
+                model_name="llama-3.3-70b-versatile",
                 groq_api_key=settings.GROQ_API_KEY,
                 temperature=0.3,
                 streaming=True
