@@ -1,0 +1,32 @@
+# Virtual environments
+venv/
+ENV/
+env/
+.env
+
+# Python caching & compiled code
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases
+chroma_db/
+*.db
+*.sqlite
+
+# Node modules & frontend builds
+node_modules/
+.next/
+out/
+build/
+dist/
+.DS_Store
+
+# Temporary audio or download workspaces
+tmp/
+temp_downloads/
+*.mp3
+*.wav
+*.m4a
