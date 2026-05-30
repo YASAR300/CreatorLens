@@ -1,305 +1,411 @@
 'use client';
 
-import React, { useState } from 'react';
-import Header from '../components/Header';
-import VideoCard from '../components/VideoCard';
-import ChatInterface from '../components/ChatInterface';
-import { 
-  Sparkles, Link2, PlayCircle, BarChart3, RefreshCw, 
-  Terminal, ShieldCheck, CheckCircle2, ChevronRight, HelpCircle 
-} from 'lucide-react';
+import React, { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Eye, RefreshCw, Loader2, CheckCircle } from "lucide-react";
+import toast from "react-hot-toast";
+import VideoCard from "../components/VideoCard";
+import SkeletonVideoCard from "../components/SkeletonVideoCard";
+import ChatInterface from "../components/ChatInterface";
+import clsx from "clsx";
 
-const Youtube = ({ className }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-  >
-    <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108c.502-1.865.502-5.837.502-5.837s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+/* ─── Processing step messages ─── */
+const STEPS = [
+  { delay: 0,     text: "Initializing pipeline…" },
+  { delay: 3000,  text: "Fetching YouTube metadata & transcript…" },
+  { delay: 8000,  text: "Scraping Instagram post metadata…" },
+  { delay: 14000, text: "Downloading Reel audio via yt-dlp…" },
+  { delay: 20000, text: "Transcribing audio via Groq Whisper…" },
+  { delay: 42000, text: "Generating semantic embeddings…" },
+  { delay: 58000, text: "Indexing chunks to ChromaDB…" },
+];
+
+/* ─── SVG icons for inputs ─── */
+const YoutubeInputIcon = () => (
+  <svg viewBox="0 0 24 24" fill="#ff3333" width="15" height="15">
+    <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108C24 15.97 24 12 24 12s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
   </svg>
 );
 
-const Instagram = ({ className }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
-    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
-    <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+const InstagramInputIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" width="15" height="15">
+    <defs>
+      <linearGradient id="ig" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0%" stopColor="#fcb045" />
+        <stop offset="50%" stopColor="#fd1d1d" />
+        <stop offset="100%" stopColor="#833ab4" />
+      </linearGradient>
+    </defs>
+    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" stroke="url(#ig)" strokeWidth="2" />
+    <circle cx="12" cy="12" r="4" stroke="url(#ig)" strokeWidth="2" />
+    <circle cx="17.5" cy="6.5" r="1.2" fill="#fd1d1d" />
   </svg>
 );
 
+/* ─── Page ─── */
 export default function Home() {
-  const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [instagramUrl, setInstagramUrl] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [loadingLogs, setLoadingLogs] = useState([]);
-  const [error, setError] = useState(null);
-  
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [instagramUrl, setInstagramUrl] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStep, setProcessingStep] = useState("");
   const [videoA, setVideoA] = useState(null);
   const [videoB, setVideoB] = useState(null);
   const [isResetting, setIsResetting] = useState(false);
+  const stepTimers = useRef([]);
 
-  // Quick preset loading for demonstration
-  const handleLoadPresets = () => {
-    setYoutubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
-    setInstagramUrl('https://www.instagram.com/reel/C42n-b0xX3y/');
+  const clearTimers = () => { stepTimers.current.forEach(clearTimeout); stepTimers.current = []; };
+
+  const startSteps = () => {
+    clearTimers();
+    STEPS.forEach(({ delay, text }) => {
+      const t = setTimeout(() => setProcessingStep(text), delay);
+      stepTimers.current.push(t);
+    });
   };
 
-  const addLog = (message) => {
-    setLoadingLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), text: message }]);
-  };
-
-  const handleIngest = async (e) => {
+  const handleAnalyze = async (e) => {
     e.preventDefault();
-    if (!youtubeUrl || !instagramUrl || loading) return;
+    if (!youtubeUrl.trim() || !instagramUrl.trim() || isProcessing) return;
 
-    setLoading(true);
-    setError(null);
-    setLoadingLogs([]);
-
-    addLog("Initializing CreatorLens ingestion pipeline...");
-    addLog("Validating social media URLs...");
+    setIsProcessing(true);
+    startSteps();
+    const tid = toast.loading("Analyzing videos… (30–90 seconds)");
 
     try {
-      // Simulate real-time logs because the backend processes multiple steps
-      setTimeout(() => addLog("Sending scraping jobs to FastAPI backend at port 8000..."), 800);
-      setTimeout(() => addLog("Scraping YouTube Video A (views, likes, comments)..."), 1800);
-      setTimeout(() => addLog("Attempting YouTube transcript lookup..."), 3000);
-      setTimeout(() => addLog("Scraping Instagram Reel Video B (likes, comments, caption)..."), 4200);
-      setTimeout(() => addLog("Retrieving Instagram followers count from post.owner_profile..."), 5500);
-      setTimeout(() => addLog("Downloading Instagram Reels audio track locally using yt-dlp..."), 7000);
-      setTimeout(() => addLog("Sending Reels audio to Groq Whisper API (whisper-large-v3)..."), 8500);
-      setTimeout(() => addLog("Transcribing audio segments with word timestamps..."), 10500);
-      setTimeout(() => addLog("Performing semantic text splitting (500 chars, 50 overlap)..."), 12000);
-      setTimeout(() => addLog("Creating vector embeddings using local sentence-transformers model..."), 13500);
-      setTimeout(() => addLog("Storing index chunks tagged with video_id (A / B) in ChromaDB..."), 15000);
-      setTimeout(() => addLog("Finalizing vector DB persistence..."), 16500);
-
-      const response = await fetch('http://127.0.0.1:8000/api/ingest', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          youtube_url: youtubeUrl,
-          instagram_url: instagramUrl
-        }),
+      const res = await fetch("http://localhost:8000/api/videos/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ youtube_url: youtubeUrl.trim(), instagram_url: instagramUrl.trim() }),
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || "Inference server failed during ingestion.");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        throw new Error(err.detail || `Server error ${res.status}`);
       }
 
-      const data = await response.json();
-      
-      addLog("Synchronized comparison stats. Ingestion Successful!");
+      const data = await res.json();
       setVideoA(data.video_a);
       setVideoB(data.video_b);
-
+      const total = (data.video_a.chunks_stored || 0) + (data.video_b.chunks_stored || 0);
+      toast.success(`Done! ${total} chunks indexed in ChromaDB.`, { id: tid });
     } catch (err) {
-      console.error(err);
-      setError(err.message || "Failed to parse metadata and transcripts. Check backend server logs.");
-      addLog("CRITICAL ERROR: Ingestion process aborted.");
+      toast.error(err.message || "Processing failed. Check backend logs.", { id: tid });
     } finally {
-      setLoading(false);
+      clearTimers();
+      setIsProcessing(false);
+      setProcessingStep("");
     }
   };
 
-  const handleResetSession = async () => {
+  const handleReset = async () => {
     setIsResetting(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/chat/reset', {
-        method: 'POST',
-      });
-      if (response.ok) {
-        setVideoA(null);
-        setVideoB(null);
-        setYoutubeUrl('');
-        setInstagramUrl('');
-        setLoadingLogs([]);
-        setError(null);
-      }
-    } catch (err) {
-      console.error("Failed to reset session", err);
+      await fetch("http://localhost:8000/api/chat/reset", { method: "POST" });
+      setVideoA(null);
+      setVideoB(null);
+      setYoutubeUrl("");
+      setInstagramUrl("");
+      toast.success("Session reset.");
+    } catch {
+      toast.error("Failed to reset.");
     } finally {
       setIsResetting(false);
     }
   };
 
   const hasData = !!(videoA && videoB);
+  const showDashboard = hasData || isProcessing;
+
+  /* Shared input style */
+  const inputBase = {
+    flex: 1,
+    background: "#111111",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 12,
+    padding: "0 14px 0 40px",
+    height: 44,
+    fontSize: 14,
+    color: "#f5f5f7",
+    outline: "none",
+    width: "100%",
+    fontFamily: "inherit",
+    transition: "border-color 150ms ease, box-shadow 150ms ease",
+  };
+
+  const focusHandlers = {
+    onFocus: (e) => {
+      e.currentTarget.style.boxShadow = "0 0 0 3px rgba(0,113,227,0.3)";
+      e.currentTarget.style.borderColor = "rgba(0,113,227,0.5)";
+    },
+    onBlur: (e) => {
+      e.currentTarget.style.boxShadow = "none";
+      e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+    },
+  };
 
   return (
-    <div className="min-h-screen bg-black text-neutral-200 selection:bg-indigo-500 selection:text-white flex flex-col font-sans antialiased">
-      {/* Dynamic Background Gradients */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-indigo-950/15 via-black to-black pointer-events-none z-0" />
-      
-      {/* Header component */}
-      <Header onReset={handleResetSession} hasData={hasData} isResetting={isResetting} />
+    <div style={{ minHeight: "100vh", background: "#000", color: "#f5f5f7", display: "flex", flexDirection: "column" }}>
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col gap-8 z-10 relative">
-        {!hasData ? (
-          /* ================= INGESTION SETUP PHASE ================= */
-          <div className="max-w-3xl mx-auto w-full flex flex-col gap-8 my-auto py-12">
-            {/* Title & Introduction */}
-            <div className="text-center flex flex-col items-center gap-3">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 rounded-full text-xs font-bold text-indigo-400 tracking-wide">
-                <Sparkles className="w-3.5 h-3.5" /> High-Performance RAG Platform
-              </div>
-              <h1 className="text-4xl sm:text-5xl font-black tracking-tight text-white mt-1 bg-gradient-to-b from-white via-neutral-100 to-neutral-500 bg-clip-text text-transparent">
-                Analyze Social Growth with RAG
-              </h1>
-              <p className="text-sm sm:text-base text-neutral-400 max-w-lg mt-2 font-medium">
-                CreatorLens fetches video transcripts, scrapes engagement metrics, and uses a local vector DB to help you understand what makes content go viral.
-              </p>
+      {/* ══ TOP BAR ══ */}
+      <div style={{
+        background: "#0a0a0a",
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        position: "sticky", top: 0, zIndex: 40,
+      }}>
+
+        {/* Logo row */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 20px", height: 52,
+          borderBottom: "1px solid rgba(255,255,255,0.04)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{
+              width: 34, height: 34, borderRadius: 9,
+              background: "linear-gradient(135deg,#0071e3,#30d158)",
+              display: "flex", alignItems: "center", justifyContent: "center", color: "#fff",
+            }}>
+              <Eye size={18} />
+            </div>
+            <span style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7" }}>CreatorLens</span>
+            <span style={{
+              fontSize: 10, fontWeight: 500, color: "#86868b",
+              background: "#111", border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 6, padding: "1px 7px",
+            }}>RAG v1.0</span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <motion.span
+                animate={{ scale: [1, 1.3, 1] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                style={{ width: 7, height: 7, borderRadius: "50%", background: "#30d158", display: "inline-block" }}
+              />
+              <span style={{ fontSize: 11, color: "#86868b" }}>System Ready</span>
             </div>
 
-            {/* Ingestion URL Form */}
-            <div className="bg-white/[0.02] backdrop-blur-xl border border-white/10 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-indigo-500/5 to-purple-500/5 rounded-bl-full pointer-events-none" />
-              
-              <form onSubmit={handleIngest} className="flex flex-col gap-6">
-                {/* Youtube URL Input */}
-                <div className="flex flex-col gap-2">
-                  <label htmlFor="youtube" className="text-xs uppercase font-extrabold text-neutral-400 tracking-wider flex items-center gap-2">
-                    <Youtube className="w-4 h-4 text-red-500" /> YouTube Video URL (Video A)
-                  </label>
-                  <div className="flex items-center gap-3 bg-neutral-950 border border-white/10 rounded-xl px-4 py-3 hover:border-white/20 focus-within:border-indigo-500 transition duration-300">
-                    <Link2 className="w-4 h-4 text-neutral-600" />
-                    <input
-                      id="youtube"
-                      type="url"
-                      required
-                      disabled={loading}
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
-                      className="bg-transparent border-0 text-xs sm:text-sm text-neutral-200 placeholder-neutral-500 outline-none w-full select-text"
-                    />
-                  </div>
-                </div>
-
-                {/* Instagram URL Input */}
-                <div className="flex flex-col gap-2">
-                  <label htmlFor="instagram" className="text-xs uppercase font-extrabold text-neutral-400 tracking-wider flex items-center gap-2">
-                    <Instagram className="w-4 h-4 text-pink-500" /> Instagram Reel URL (Video B)
-                  </label>
-                  <div className="flex items-center gap-3 bg-neutral-950 border border-white/10 rounded-xl px-4 py-3 hover:border-white/20 focus-within:border-indigo-500 transition duration-300">
-                    <Link2 className="w-4 h-4 text-neutral-600" />
-                    <input
-                      id="instagram"
-                      type="url"
-                      required
-                      disabled={loading}
-                      placeholder="https://www.instagram.com/reel/..."
-                      value={instagramUrl}
-                      onChange={(e) => setInstagramUrl(e.target.value)}
-                      className="bg-transparent border-0 text-xs sm:text-sm text-neutral-200 placeholder-neutral-500 outline-none w-full select-text"
-                    />
-                  </div>
-                </div>
-
-                {/* Form Buttons */}
-                <div className="flex flex-col sm:flex-row items-center gap-4 mt-2">
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="w-full sm:flex-1 py-3.5 bg-gradient-to-tr from-indigo-500 to-purple-500 text-white font-extrabold text-xs sm:text-sm rounded-xl cursor-pointer hover:shadow-lg hover:shadow-indigo-500/25 active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    {loading ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        Synchronizing Video Data...
-                      </>
-                    ) : (
-                      <>
-                        <BarChart3 className="w-4 h-4" />
-                        Analyze & Ingest Creator Data
-                      </>
-                    )}
-                  </button>
-                  
-                  <button
-                    type="button"
-                    onClick={handleLoadPresets}
-                    disabled={loading}
-                    className="w-full sm:w-auto px-5 py-3.5 bg-white/5 hover:bg-white/10 active:bg-white/15 border border-white/10 rounded-xl font-bold text-xs text-neutral-400 hover:text-white transition duration-200 cursor-pointer disabled:opacity-50"
-                  >
-                    Load Free Demo Presets
-                  </button>
-                </div>
-              </form>
-            </div>
-
-            {/* Live Progress Logs for Loading */}
-            {loadingLogs.length > 0 && (
-              <div className="bg-neutral-950/60 border border-white/10 rounded-2xl p-6 shadow-2xl flex flex-col gap-4 relative">
-                <div className="flex items-center justify-between border-b border-white/5 pb-3">
-                  <span className="text-xs uppercase font-extrabold text-neutral-400 tracking-wider flex items-center gap-2">
-                    <Terminal className="w-4 h-4 text-indigo-400" /> Ingestion Terminal Logs
-                  </span>
-                  <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
-                </div>
-                
-                <div className="h-44 overflow-y-auto font-mono text-[11px] text-neutral-400 flex flex-col gap-1.5 scrollbar-thin">
-                  {loadingLogs.map((log, idx) => (
-                    <div key={idx} className="flex items-start gap-3 hover:text-neutral-200 transition duration-100">
-                      <span className="text-neutral-600 flex-shrink-0">[{log.time}]</span>
-                      <span className="flex-shrink-0 text-indigo-500">&gt;</span>
-                      <span className="leading-relaxed">{log.text}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Error Message */}
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6 shadow-2xl text-xs text-red-400 flex flex-col gap-1.5 animate-shake">
-                <h3 className="font-extrabold uppercase tracking-wider text-red-500">Pipeline Execution Error</h3>
-                <p className="leading-relaxed font-semibold">{error}</p>
-                <p className="text-[10px] text-neutral-500 mt-1">Make sure the FastAPI backend is running locally on port 8000 and your GROQ_API_KEY environment variable is valid.</p>
-              </div>
+            {hasData && (
+              <motion.button
+                whileHover={{ color: "#f5f5f7" }}
+                whileTap={{ scale: 0.97 }}
+                onClick={handleReset}
+                disabled={isResetting}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "6px 14px",
+                  background: "#111", border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 8, fontSize: 12, fontWeight: 500, color: "#86868b",
+                  cursor: "pointer",
+                }}
+              >
+                <RefreshCw size={13} />
+                {isResetting ? "Resetting…" : "Reset Session"}
+              </motion.button>
             )}
           </div>
-        ) : (
-          /* ================= ACTIVE COMPARISON DASHBOARD ================= */
-          <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch h-full">
-            {/* Left side: Video Comparison Cards */}
-            <div className="lg:col-span-6 flex flex-col gap-6 h-full">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="font-black text-xl text-white tracking-tight flex items-center gap-2">
-                    <BarChart3 className="w-5 h-5 text-indigo-400" /> Comparison Deck
-                  </h2>
-                  <p className="text-xs text-neutral-500 mt-0.5">Metrics synced dynamically from public scraping</p>
-                </div>
-                <div className="px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-bold text-[10px] uppercase rounded-full flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" /> Persisted In ChromaDB
-                </div>
-              </div>
+        </div>
 
-              <div className="flex flex-col gap-6 overflow-y-auto lg:max-h-[750px] scrollbar-thin">
-                <VideoCard video={videoA} label="Video A" />
-                <VideoCard video={videoB} label="Video B" />
-              </div>
-            </div>
-
-            {/* Right side: RAG Streaming Chatbot Interface */}
-            <div className="lg:col-span-6 h-full flex flex-col">
-              <ChatInterface videoA={videoA} videoB={videoB} />
-            </div>
+        {/* URL form row */}
+        <form onSubmit={handleAnalyze} style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "0 20px", height: 60,
+        }}>
+          {/* YouTube */}
+          <div style={{ flex: 1, position: "relative" }}>
+            <span style={{
+              position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
+              display: "flex", alignItems: "center", pointerEvents: "none",
+            }}>
+              <YoutubeInputIcon />
+            </span>
+            <input
+              type="url" required disabled={isProcessing}
+              placeholder="https://www.youtube.com/watch?v=…"
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              style={inputBase}
+              {...focusHandlers}
+            />
           </div>
-        )}
-      </main>
+
+          {/* Instagram */}
+          <div style={{ flex: 1, position: "relative" }}>
+            <span style={{
+              position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
+              display: "flex", alignItems: "center", pointerEvents: "none",
+            }}>
+              <InstagramInputIcon />
+            </span>
+            <input
+              type="url" required disabled={isProcessing}
+              placeholder="https://www.instagram.com/reel/…"
+              value={instagramUrl}
+              onChange={(e) => setInstagramUrl(e.target.value)}
+              style={inputBase}
+              {...focusHandlers}
+            />
+          </div>
+
+          {/* Analyze button */}
+          <motion.button
+            type="submit"
+            disabled={isProcessing}
+            whileHover={!isProcessing ? { background: "#0077ed", scale: 1.01 } : {}}
+            whileTap={!isProcessing ? { scale: 0.99 } : {}}
+            style={{
+              height: 44, padding: "0 20px",
+              background: "#0071e3", border: "none", borderRadius: 12,
+              fontSize: 14, fontWeight: 500, color: "#fff",
+              cursor: isProcessing ? "not-allowed" : "pointer",
+              opacity: isProcessing ? 0.7 : 1,
+              display: "flex", alignItems: "center", gap: 8,
+              flexShrink: 0, whiteSpace: "nowrap",
+            }}
+          >
+            {isProcessing
+              ? <><Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> Analyzing…</>
+              : "Analyze Videos"
+            }
+          </motion.button>
+        </form>
+
+        {/* Progress bar + step */}
+        <AnimatePresence>
+          {isProcessing && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              style={{ padding: "6px 20px 10px", overflow: "hidden" }}
+            >
+              <div style={{
+                height: 2, background: "rgba(255,255,255,0.06)",
+                borderRadius: 1, overflow: "hidden", marginBottom: 6,
+              }}>
+                <div
+                  className="indeterminate-bar"
+                  style={{
+                    height: "100%", width: "20%",
+                    background: "linear-gradient(90deg, transparent, #0071e3, transparent)",
+                  }}
+                />
+              </div>
+              <motion.p
+                key={processingStep}
+                initial={{ opacity: 0, x: -6 }}
+                animate={{ opacity: 1, x: 0 }}
+                style={{ fontSize: 12, color: "#86868b", margin: 0 }}
+              >
+                {processingStep}
+              </motion.p>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* ══ MAIN CONTENT ══ */}
+      {!showDashboard ? (
+        /* Landing */
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          style={{
+            flex: 1, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center",
+            padding: "60px 20px", textAlign: "center",
+          }}
+        >
+          <motion.div
+            animate={{ scale: [1, 1.05, 1] }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+            style={{
+              width: 72, height: 72,
+              background: "linear-gradient(135deg, rgba(0,113,227,0.12), rgba(48,209,88,0.12))",
+              border: "1px solid rgba(0,113,227,0.2)",
+              borderRadius: 22,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              marginBottom: 24, color: "#0071e3",
+            }}
+          >
+            <Eye size={28} />
+          </motion.div>
+
+          <h1 style={{ fontSize: 36, fontWeight: 600, color: "#f5f5f7", margin: "0 0 14px", letterSpacing: "-0.5px" }}>
+            Analyze Social Growth with RAG
+          </h1>
+          <p style={{ fontSize: 16, color: "#86868b", maxWidth: 480, lineHeight: 1.6, margin: 0 }}>
+            Enter a YouTube URL and Instagram Reel URL above to compare their transcripts,
+            engagement metrics, and creator strategy using AI.
+          </p>
+        </motion.div>
+
+      ) : (
+        /* Dashboard — 2-column */
+        <div style={{
+          flex: 1, display: "grid",
+          gridTemplateColumns: "1fr 480px",
+          minHeight: 0,
+        }}>
+          {/* Left: cards */}
+          <div style={{ overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <h2 style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7", margin: "0 0 2px" }}>Comparison</h2>
+                <p style={{ fontSize: 13, color: "#86868b", margin: 0 }}>
+                  {isProcessing ? processingStep || "Processing…" : "Live metrics from scraped data"}
+                </p>
+              </div>
+              {hasData && (
+                <motion.span
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  style={{
+                    fontSize: 11, color: "#30d158",
+                    background: "rgba(48,209,88,0.1)", border: "1px solid rgba(48,209,88,0.2)",
+                    borderRadius: 6, padding: "3px 10px", fontWeight: 500,
+                    display: "flex", alignItems: "center", gap: 5,
+                  }}
+                >
+                  <CheckCircle size={12} /> Indexed in ChromaDB
+                </motion.span>
+              )}
+            </div>
+
+            {isProcessing ? (
+              <>
+                <SkeletonVideoCard />
+                <SkeletonVideoCard />
+              </>
+            ) : (
+              <AnimatePresence>
+                {videoA && <VideoCard key="a" video={videoA} animationDelay={0} />}
+                {videoB && <VideoCard key="b" video={videoB} animationDelay={100} />}
+              </AnimatePresence>
+            )}
+          </div>
+
+          {/* Right: chat */}
+          <div style={{ position: "sticky", top: 0, height: "calc(100vh - 114px)", overflow: "hidden" }}>
+            <ChatInterface />
+          </div>
+        </div>
+      )}
+
+      {/* Responsive: stack on < 1024px */}
+      <style>{`
+        @media (max-width: 1023px) {
+          [style*="grid-template-columns: 1fr 480px"] {
+            grid-template-columns: 1fr !important;
+          }
+          [style*="position: sticky; top: 0; height: calc(100vh - 114px)"] {
+            position: relative !important;
+            height: 520px !important;
+          }
+        }
+        @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+      `}</style>
     </div>
   );
 }

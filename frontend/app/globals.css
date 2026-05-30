@@ -1,26 +1,99 @@
 @import "tailwindcss";
 
+/* ─── Apple Design System ─── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg-root: #000000;
+  --bg-surface: #0a0a0a;
+  --bg-raised: #111111;
+  --bg-overlay: #1a1a1a;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-light: rgba(255, 255, 255, 0.12);
+  --text-primary: #f5f5f7;
+  --text-secondary: #86868b;
+  --text-tertiary: #48484a;
+  --apple-blue: #0071e3;
+  --apple-blue-hover: #0077ed;
+  --apple-green: #30d158;
+  --apple-red: #ff453a;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* ─── Base ─── */
+html { color-scheme: dark; font-size: 16px; line-height: 1.5; }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #000000;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Custom Scrollbar ─── */
+* { scrollbar-width: thin; scrollbar-color: #333333 transparent; }
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background-color: #333333; border-radius: 9999px; }
+*::-webkit-scrollbar-thumb:hover { background-color: #555555; }
+
+/* ─── Keyframes ─── */
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes indeterminate-bar {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(500%); }
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ─── Animation utility classes ─── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.00) 0%,
+    rgba(255,255,255,0.06) 50%,
+    rgba(255,255,255,0.00) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite linear;
+}
+
+.indeterminate-bar {
+  animation: indeterminate-bar 1.8s ease-in-out infinite;
+}
+
+.blink-cursor {
+  animation: blink-cursor 500ms ease-in-out infinite;
+}
+
+/* ─── Apple focus ring ─── */
+.apple-focus:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.35) !important;
+  border-color: rgba(0, 113, 227, 0.6) !important;
+}
+
+/* ─── Gradient engagement text ─── */
+.engagement-gradient {
+  background: linear-gradient(90deg, #30d158, #0071e3);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── Radix Tooltip animation ─── */
+.TooltipContent {
+  animation-duration: 150ms;
+  animation-timing-function: ease-out;
+}
+.TooltipContent[data-state='delayed-open'] {
+  animation-name: slideUpAndFade;
+}
+@keyframes slideUpAndFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

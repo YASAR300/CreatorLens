@@ -1,206 +1,218 @@
-import React, { useState } from 'react';
-import { 
-  Eye, Heart, MessageSquare, Users, 
-  Calendar, Clock, Hash, FileText, ChevronDown, ChevronUp 
-} from 'lucide-react';
+'use client';
 
-const Youtube = ({ className }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-  >
-    <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108c.502-1.865.502-5.837.502-5.837s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+import React, { useState } from "react";
+import { motion } from "framer-motion";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import clsx from "clsx";
+
+/* ─── Platform SVG icons ─── */
+const YoutubeIcon = ({ size = 14 }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width={size} height={size}>
+    <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108C24 15.97 24 12 24 12s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
   </svg>
 );
 
-const Instagram = ({ className }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
+const InstagramIcon = ({ size = 14 }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width={size} height={size}>
     <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
     <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
     <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
   </svg>
 );
 
-export default function VideoCard({ video, label }) {
-  const [showTranscript, setShowTranscript] = useState(false);
+/* ─── Stat column ─── */
+function StatColumn({ label, value }) {
+  return (
+    <div style={{ background: "#0a0a0a", padding: "14px 16px" }}>
+      <div style={{ fontSize: "11px", fontWeight: 500, color: "#86868b", letterSpacing: "0.8px", textTransform: "uppercase", marginBottom: "4px" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: "16px", fontWeight: 500, color: "#f5f5f7" }}>{value}</div>
+    </div>
+  );
+}
 
-  // Formatting utilities
-  const formatNumber = (num) => {
-    if (!num) return '0';
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-    return num.toString();
-  };
+/* ─── Formatters ─── */
+function fmt(n) {
+  if (n == null) return "—";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
 
-  const isYoutube = video?.platform === 'youtube';
+/* ─── VideoCard ─── */
+export default function VideoCard({ video, animationDelay = 0 }) {
+  const [thumbError, setThumbError] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   if (!video) return null;
 
+  const isYoutube = video.platform === "youtube";
+  const tags = video.hashtags || [];
+  const visibleTags = showAll ? tags : tags.slice(0, 8);
+  const hidden = tags.length - 8;
+  const rawThumb = video.thumbnail_url || video.thumbnail || null;
+  const thumb = (video.platform === "instagram" && rawThumb)
+    ? `http://localhost:8000/api/videos/thumbnail-proxy?url=${encodeURIComponent(rawThumb)}`
+    : rawThumb;
+
   return (
-    <div className="w-full bg-white/[0.03] backdrop-blur-xl border border-white/10 rounded-2xl p-6 shadow-2xl hover:border-white/20 transition-all duration-300 flex flex-col gap-6 relative overflow-hidden group">
-      {/* Platform Highlight Badge */}
-      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-bl-full pointer-events-none" />
-      
-      {/* Card Header */}
-      <div className="flex items-center justify-between border-b border-white/5 pb-4">
-        <div className="flex items-center gap-3">
-          <span className={`px-3 py-1 text-xs font-bold uppercase rounded-lg tracking-widest ${
-            label === 'Video A' 
-              ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' 
-              : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
-          }`}>
-            {label}
-          </span>
-          <span className="text-neutral-400 text-xs flex items-center gap-1.5">
-            {isYoutube ? (
-              <Youtube className="w-3.5 h-3.5 text-red-500" />
-            ) : (
-              <Instagram className="w-3.5 h-3.5 text-pink-500" />
-            )}
-            {isYoutube ? 'YouTube' : 'Instagram Reel'}
-          </span>
-        </div>
-        
-        {/* Engagement Rate Badge */}
-        <div className="text-right">
-          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider block">Engagement Rate</span>
-          <span className="text-lg font-black bg-gradient-to-r from-emerald-400 to-green-400 bg-clip-text text-transparent">
-            {video.engagement_rate}%
-          </span>
-        </div>
-      </div>
-
-      {/* Video Details Row */}
-      <div className="flex gap-4">
-        {/* Thumbnail or Platform Mock Icon */}
-        <div className="w-24 h-24 sm:w-28 sm:h-28 bg-neutral-900 rounded-xl overflow-hidden border border-white/5 flex-shrink-0 relative">
-          {video.thumbnail ? (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img 
-              src={video.thumbnail} 
-              alt={video.title} 
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-neutral-950">
-              {isYoutube ? (
-                <Youtube className="w-8 h-8 text-neutral-700" />
-              ) : (
-                <Instagram className="w-8 h-8 text-neutral-700" />
-              )}
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: "easeOut", delay: animationDelay / 1000 }}
+      whileHover={{ y: -2, boxShadow: "0 8px 40px rgba(0,0,0,0.7)" }}
+      style={{
+        background: "#0a0a0a",
+        border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: "20px",
+        overflow: "hidden",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+        transition: "box-shadow 200ms ease",
+      }}
+    >
+      {/* ── Thumbnail ── */}
+      <div style={{ position: "relative", width: "100%", aspectRatio: "16/9" }}>
+        {thumb && !thumbError ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumb}
+            alt={video.title || "thumbnail"}
+            onError={() => setThumbError(true)}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          <div style={{
+            width: "100%", height: "100%",
+            background: "linear-gradient(135deg,#0a0a0a,#111111)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <div style={{ color: "#2a2a2a", transform: "scale(3)" }}>
+              {isYoutube ? <YoutubeIcon size={16} /> : <InstagramIcon size={16} />}
             </div>
-          )}
-          
-          <div className="absolute bottom-1 right-1 bg-black/75 px-1.5 py-0.5 rounded text-[10px] font-semibold text-white/90 flex items-center gap-1">
-            <Clock className="w-2.5 h-2.5" />
-            {video.duration}s
           </div>
-        </div>
+        )}
 
-        {/* Text Details */}
-        <div className="flex flex-col justify-between py-1">
-          <div>
-            <h3 className="font-bold text-sm sm:text-base text-neutral-100 line-clamp-2 leading-snug group-hover:text-white transition-colors duration-200">
+        {/* Platform badge */}
+        <div style={{
+          position: "absolute", top: 12, left: 12,
+          display: "flex", alignItems: "center", gap: 5,
+          padding: "4px 10px", borderRadius: 20,
+          fontSize: 11, fontWeight: 500, color: "#fff",
+          backdropFilter: "blur(12px)",
+          background: isYoutube
+            ? "rgba(255,0,0,0.85)"
+            : "linear-gradient(135deg,rgba(131,58,180,0.9),rgba(253,29,29,0.9),rgba(252,176,69,0.9))",
+        }}>
+          {isYoutube ? <YoutubeIcon /> : <InstagramIcon />}
+          {isYoutube ? "Video A · YouTube" : "Video B · Instagram"}
+        </div>
+      </div>
+
+      {/* ── Body ── */}
+      <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+
+        {/* Creator + meta */}
+        <div>
+          <h3 style={{ fontSize: 18, fontWeight: 500, color: "#f5f5f7", margin: "0 0 3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {video.creator || "Unknown Creator"}
+          </h3>
+          {video.title && (
+            <p style={{ fontSize: 13, color: "#86868b", margin: "0 0 2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {video.title}
-            </h3>
-            <p className="text-xs text-neutral-400 mt-1.5 font-medium">
-              @{video.creator}
             </p>
+          )}
+          <p style={{ fontSize: 13, color: "#86868b", margin: 0 }}>
+            {video.upload_date || "—"}{video.duration ? ` · ${video.duration}` : ""}
+          </p>
+        </div>
+
+        {/* Stats row */}
+        <div style={{
+          display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+          gap: 1, background: "rgba(255,255,255,0.06)",
+          borderRadius: 12, overflow: "hidden",
+        }}>
+          <StatColumn label="Views" value={fmt(video.views)} />
+          <StatColumn label="Likes" value={fmt(video.likes)} />
+          <StatColumn label="Comments" value={fmt(video.comments)} />
+        </div>
+
+        {/* Engagement rate */}
+        <div>
+          <div className="engagement-gradient" style={{ fontSize: 32, fontWeight: 600, lineHeight: 1.1 }}>
+            {video.engagement_rate != null ? `${video.engagement_rate}%` : "—"}
           </div>
-          
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-neutral-500">
-            <span className="flex items-center gap-1">
-              <Calendar className="w-3 h-3" />
-              {video.upload_date}
-            </span>
+          <div style={{ fontSize: 11, color: "#86868b", letterSpacing: "0.8px", textTransform: "uppercase", marginTop: 4 }}>
+            Engagement Rate
           </div>
         </div>
-      </div>
 
-      {/* Core Engagement Stats Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-white/[0.01] border border-white/5 rounded-xl p-4">
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider flex items-center gap-1.5">
-            <Eye className="w-3.5 h-3.5 text-neutral-500" /> Views
-          </span>
-          <span className="text-sm font-black text-neutral-200">{formatNumber(video.views)}</span>
-        </div>
-        
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider flex items-center gap-1.5">
-            <Heart className="w-3.5 h-3.5 text-neutral-500" /> Likes
-          </span>
-          <span className="text-sm font-black text-neutral-200">{formatNumber(video.likes)}</span>
-        </div>
-        
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider flex items-center gap-1.5">
-            <MessageSquare className="w-3.5 h-3.5 text-neutral-500" /> Comments
-          </span>
-          <span className="text-sm font-black text-neutral-200">{formatNumber(video.comments)}</span>
-        </div>
-        
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider flex items-center gap-1.5">
-            <Users className="w-3.5 h-3.5 text-neutral-500" /> Followers
-          </span>
-          <span className="text-sm font-black text-neutral-200">{formatNumber(video.follower_count)}</span>
-        </div>
-      </div>
+        {/* Hashtags */}
+        {tags.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {visibleTags.map((tag, i) => (
+              <motion.span
+                key={i}
+                whileHover={{ borderColor: "rgba(255,255,255,0.22)", color: "#cccccc" }}
+                style={{
+                  background: "#1a1a1a",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 12, padding: "5px 10px",
+                  fontSize: 11, color: "#86868b", cursor: "default",
+                }}
+              >
+                #{tag}
+              </motion.span>
+            ))}
 
-      {/* Hashtags Row */}
-      {video.hashtags && video.hashtags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 border-t border-white/5 pt-4">
-          <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider flex items-center gap-1 mr-1">
-            <Hash className="w-3 h-3" /> Tags:
-          </span>
-          {video.hashtags.slice(0, 5).map((tag, idx) => (
-            <span 
-              key={idx} 
-              className="text-[10px] font-semibold bg-white/5 hover:bg-white/10 text-neutral-300 border border-white/5 hover:border-white/10 px-2 py-0.5 rounded-md transition duration-200 cursor-pointer"
-            >
-              #{tag}
-            </span>
-          ))}
-        </div>
-      )}
+            {!showAll && hidden > 0 && (
+              <motion.button
+                whileHover={{ color: "#86868b" }}
+                onClick={() => setShowAll(true)}
+                style={{
+                  background: "#1a1a1a",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 12, padding: "5px 10px",
+                  fontSize: 11, color: "#48484a", cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 3,
+                }}
+              >
+                +{hidden} more <ChevronDown size={11} />
+              </motion.button>
+            )}
 
-      {/* Transcript Preview Toggle */}
-      <div className="border-t border-white/5 pt-4">
-        <button
-          onClick={() => setShowTranscript(!showTranscript)}
-          className="w-full flex items-center justify-between text-xs font-semibold text-neutral-400 hover:text-neutral-200 transition duration-200 cursor-pointer"
-        >
-          <span className="flex items-center gap-1.5">
-            <FileText className="w-3.5 h-3.5" />
-            Show Video Transcript Loaded in Vector DB
-          </span>
-          {showTranscript ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-        </button>
-
-        {showTranscript && (
-          <div className="mt-3 bg-neutral-950/70 border border-white/5 rounded-xl p-3.5 h-44 overflow-y-auto font-mono text-[11px] text-neutral-400 leading-relaxed scrollbar-thin">
-            {video.transcript ? (
-              video.transcript.split('\n').map((line, idx) => (
-                <div key={idx} className="hover:text-neutral-200 transition duration-100">
-                  {line}
-                </div>
-              ))
-            ) : (
-              <span className="text-neutral-600 italic">No transcript chunks successfully loaded.</span>
+            {showAll && hidden > 0 && (
+              <motion.button
+                whileHover={{ color: "#86868b" }}
+                onClick={() => setShowAll(false)}
+                style={{
+                  background: "#1a1a1a",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 12, padding: "5px 10px",
+                  fontSize: 11, color: "#48484a", cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 3,
+                }}
+              >
+                Show less <ChevronUp size={11} />
+              </motion.button>
             )}
           </div>
         )}
+
+        {/* Footer: followers + chunks */}
+        {(video.follower_count > 0 || video.chunks_stored > 0) && (
+          <div style={{
+            paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)",
+            fontSize: 13, color: "#86868b",
+          }}>
+            {video.follower_count > 0 && (
+              <span><span style={{ color: "#f5f5f7", fontWeight: 500 }}>{fmt(video.follower_count)}</span> followers · </span>
+            )}
+            <span><span style={{ color: "#f5f5f7", fontWeight: 500 }}>{video.chunks_stored || 0}</span> chunks indexed</span>
+          </div>
+        )}
       </div>
-    </div>
+    </motion.div>
   );
 }

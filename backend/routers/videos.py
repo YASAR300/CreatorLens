@@ -1,15 +1,46 @@
 import logging
 import asyncio
-from fastapi import APIRouter, HTTPException
+import httpx
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from instaloader.exceptions import InstaloaderException
 
 from models import VideoProcessRequest, ProcessVideosResponse, VideoMetadata
 from services.youtube_service import get_youtube_data, extract_video_id
 from services.instagram_service import get_instagram_data
 from services.vector_service import clear_collection, process_and_store
+from services.rag_service import set_video_metadata
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.get("/thumbnail-proxy")
+async def thumbnail_proxy(url: str = Query(..., description="CDN image URL to proxy")):
+    """
+    Server-side image proxy for Instagram CDN thumbnails.
+    Instagram blocks cross-origin <img> loads from browsers, but fetching
+    from the server has no such restriction. Streams the image bytes back
+    with the correct Content-Type header.
+    """
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid image URL.")
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type=content_type,
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch thumbnail from CDN.")
+    except Exception as e:
+        logger.error(f"Thumbnail proxy error: {e}")
+        raise HTTPException(status_code=502, detail="Could not retrieve thumbnail image.")
+
 
 @router.post("/process", response_model=ProcessVideosResponse)
 async def process_videos(request: VideoProcessRequest):
@@ -95,6 +126,32 @@ async def process_videos(request: VideoProcessRequest):
         )
         
         logger.info(f"Ingestion successful! Stored A={chunks_a} chunks, B={chunks_b} chunks.")
+        
+        # Inject metadata into the RAG system prompt so the LLM knows creator/follower info for both videos
+        set_video_metadata(
+            meta_a={
+                "creator": yt_data.get("creator", "Unknown"),
+                "follower_count": int(yt_data.get("subscriber_count", 0)),
+                "views": int(yt_data.get("views", 0)),
+                "likes": int(yt_data.get("likes", 0)),
+                "comments": int(yt_data.get("comments", 0)),
+                "engagement_rate": float(yt_data.get("engagement_rate", 0.0)),
+                "duration": yt_data.get("duration", 0),
+                "upload_date": str(yt_data.get("upload_date", "Unknown")),
+                "hashtags": yt_data.get("tags", []),
+            },
+            meta_b={
+                "creator": ig_data.get("creator", "Unknown"),
+                "follower_count": int(ig_data.get("subscriber_count", 0)),
+                "views": int(ig_data.get("views", 0)),
+                "likes": int(ig_data.get("likes", 0)),
+                "comments": int(ig_data.get("comments", 0)),
+                "engagement_rate": float(ig_data.get("engagement_rate", 0.0)),
+                "duration": ig_data.get("duration", 0),
+                "upload_date": str(ig_data.get("upload_date", "Unknown")),
+                "hashtags": ig_data.get("tags", []),
+            }
+        )
         
         return ProcessVideosResponse(
             video_a=video_a_meta,

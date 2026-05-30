@@ -1,322 +1,362 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, AlertCircle, RefreshCw, PlayCircle, ExternalLink, HelpCircle } from 'lucide-react';
+'use client';
+
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Send, Square, Zap } from "lucide-react";
+import clsx from "clsx";
+import MessageBubble from "./MessageBubble";
 
 const SUGGESTIONS = [
-  "Why did Video A get more engagement than Video B?",
-  "What's the engagement rate of each?",
-  "Compare the hooks in the first 5 seconds.",
-  "Who's the creator of Video B and what's their follower count?",
-  "Suggest improvements for B based on what worked in A."
+  "Why did Video A get more engagement?",
+  "Compare the hooks in the first 5 seconds",
+  "What's the engagement rate of each video?",
+  "Who created Video B and their followers?",
+  "Suggest 3 improvements for Video B",
 ];
 
-export default function ChatInterface({ videoA, videoB }) {
-  const [messages, setMessages] = useState([
-    {
-      id: 'welcome',
-      sender: 'bot',
-      text: "Hey! I'm your CreatorLens Strategy Assistant. Both Video A and Video B have been successfully transcribed and indexed into ChromaDB. Ask me anything to compare their hook strength, loopability, viewer retention strategies, or calculated engagement stats!",
-      timestamp: new Date()
-    }
-  ]);
-  const [input, setInput] = useState('');
+export default function ChatInterface() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [error, setError] = useState(null);
-  
+  const readerRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const textareaRef = useRef(null);
 
-  // Auto-scroll to bottom as text streams
+  /* Auto-scroll */
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSend = async (textToSend) => {
-    const queryText = textToSend || input;
-    if (!queryText.trim() || isStreaming) return;
+  /* Auto-resize textarea (1–4 rows) */
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 96) + "px";
+  }, [input]);
 
-    if (!textToSend) {
-      setInput('');
-    }
-    setError(null);
+  const stopStream = useCallback(() => {
+    readerRef.current?.cancel();
+    readerRef.current = null;
+    setIsStreaming(false);
+    setMessages((prev) =>
+      prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m))
+    );
+  }, []);
 
-    // 1. Add user message
-    const userMsg = {
-      id: `user-${Date.now()}`,
-      sender: 'user',
-      text: queryText,
-      timestamp: new Date()
-    };
-    setMessages(prev => [...prev, userMsg]);
+  const handleSend = useCallback(async (textOverride) => {
+    const query = (textOverride ?? input).trim();
+    if (!query || isStreaming) return;
 
-    // 2. Prepare streaming bot message placeholder
-    const botMsgId = `bot-${Date.now()}`;
-    const botPlaceholder = {
-      id: botMsgId,
-      sender: 'bot',
-      text: '',
-      citations: [],
-      timestamp: new Date(),
-      isStreaming: true
-    };
-    setMessages(prev => [...prev, botPlaceholder]);
+    setInput("");
     setIsStreaming(true);
 
+    const userMsg = { id: `u-${Date.now()}`, sender: "user", text: query };
+    const botId = `b-${Date.now()}`;
+    const botMsg = { id: botId, sender: "bot", text: "", citations: [], isStreaming: true };
+
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+
     try {
-      // Create EventSource request for GET /api/chat?query=...
-      const encodedQuery = encodeURIComponent(queryText);
-      const url = `http://127.0.0.1:8000/api/chat?query=${encodedQuery}`;
-      
-      const eventSource = new EventSource(url);
-      
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.type === 'citations') {
-            // Store citations directly into the streaming message
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === botMsgId) {
-                return { ...msg, citations: data.citations };
-              }
-              return msg;
-            }));
-          } 
-          else if (data.type === 'content') {
-            // Append token delta to text block
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === botMsgId) {
-                return { ...msg, text: msg.text + data.delta };
-              }
-              return msg;
-            }));
-          } 
-          else if (data.type === 'error') {
-            setError(data.content);
-            eventSource.close();
-            setIsStreaming(false);
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === botMsgId) {
-                return { ...msg, isStreaming: false, text: msg.text + `\n\n[Error: ${data.content}]` };
-              }
-              return msg;
-            }));
-          } 
-          else if (data.type === 'done') {
-            eventSource.close();
-            setIsStreaming(false);
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === botMsgId) {
-                return { ...msg, isStreaming: false };
-              }
-              return msg;
-            }));
+      const res = await fetch("http://localhost:8000/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: query }),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const reader = res.body.getReader();
+      readerRef.current = reader;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let pendingEvent = null;
+      let done = false;
+
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        done = streamDone;
+        if (value) buffer += decoder.decode(value, { stream: true });
+
+        // Process all complete lines in buffer
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // keep trailing partial line
+
+        for (const raw of lines) {
+          const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+          if (!line) continue;
+
+          if (line.startsWith("event:")) {
+            pendingEvent = line.slice(6).trim();
+            continue;
           }
-        } catch (parseErr) {
-          console.error("Failed to parse SSE payload", parseErr);
+
+          if (line.startsWith("data:")) {
+            // Strip exactly "data: " (6 chars when a space follows the colon).
+            // Do NOT call .trim() — LLM tokens carry their own leading space
+            // (e.g. " need") and trimming merges words together.
+            const data = line.startsWith("data: ") ? line.slice(6) : line.slice(5);
+
+            if (data === "[DONE]") {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === botId ? { ...m, isStreaming: false } : m))
+              );
+              setIsStreaming(false);
+              readerRef.current = null;
+              done = true;
+              break;
+            }
+
+            if (pendingEvent === "sources") {
+              try {
+                const sources = JSON.parse(data);
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === botId ? { ...m, citations: sources } : m))
+                );
+              } catch { /* skip malformed */ }
+              pendingEvent = null;
+              continue;
+            }
+
+            // Try to detect error JSON
+            if (data.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.type === "error") {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === botId
+                        ? { ...m, text: m.text + `\n\n[Error: ${parsed.content}]`, isStreaming: false }
+                        : m
+                    )
+                  );
+                  setIsStreaming(false);
+                  readerRef.current = null;
+                  done = true;
+                  break;
+                }
+              } catch { /* not an error JSON, fall through */ }
+            }
+
+            // Regular token
+            setMessages((prev) =>
+              prev.map((m) => (m.id === botId ? { ...m, text: m.text + data } : m))
+            );
+            pendingEvent = null;
+          }
         }
-      };
-
-      eventSource.onerror = (err) => {
-        console.error("EventSource encountered an error", err);
-        setError("Connection lost to RAG backend stream.");
-        eventSource.close();
-        setIsStreaming(false);
-        setMessages(prev => prev.map(msg => {
-          if (msg.id === botMsgId) {
-            return { ...msg, isStreaming: false, text: msg.text ? msg.text : "Failed to load response from backend API." };
-          }
-          return msg;
-        }));
-      };
-
+      }
     } catch (err) {
-      setError(err.message || "Failed to initialize RAG Stream.");
+      if (err?.name !== "AbortError") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === botId
+              ? { ...m, text: m.text || "Connection failed. Is the backend running on port 8000?", isStreaming: false }
+              : m
+          )
+        );
+      }
       setIsStreaming(false);
+      readerRef.current = null;
+    }
+  }, [input, isStreaming]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
     }
   };
 
-  const getPlatformIcon = (platform) => {
-    return platform === 'youtube' ? 'YouTube' : 'Instagram Reel';
-  };
-
-  // Convert inline citations like [Video A, 01:15] to interactive hover triggers
-  const formatMessageText = (text) => {
-    if (!text) return "";
-    
-    // Regular expression to match standard citation tags: [Video A, 01:15] or [Video A, Metadata]
-    const parts = text.split(/(\[Video [A|B], [^\]]+\])/g);
-    
-    return parts.map((part, idx) => {
-      const match = part.match(/\[Video ([A|B]), ([^\]]+)\]/);
-      if (match) {
-        const videoId = match[1];
-        const sourceDetails = match[2];
-        const isA = videoId === 'A';
-        
-        return (
-          <span 
-            key={idx}
-            className={`inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded text-[10px] font-bold border cursor-pointer select-none transition ${
-              isA 
-                ? 'bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border-indigo-500/20' 
-                : 'bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border-purple-500/20'
-            }`}
-            title={`Referenced source: Video ${videoId} at ${sourceDetails}`}
-          >
-            Video {videoId} ({sourceDetails})
-          </span>
-        );
-      }
-      return part;
-    });
-  };
+  const isEmpty = !input.trim();
 
   return (
-    <div className="flex flex-col h-[650px] sm:h-full bg-white/[0.02] border border-white/10 rounded-2xl overflow-hidden shadow-2xl relative">
-      {/* Interface Title */}
-      <div className="px-6 py-4 border-b border-white/5 bg-white/[0.01] flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse" />
-          <h2 className="font-extrabold text-sm uppercase tracking-wider text-neutral-200">
-            RAG Strategy Advisor
-          </h2>
+    <div style={{
+      width: "100%", height: "100%",
+      background: "#0a0a0a",
+      borderLeft: "1px solid rgba(255,255,255,0.08)",
+      display: "flex", flexDirection: "column", overflow: "hidden",
+    }}>
+
+      {/* ── Header ── */}
+      <div style={{
+        height: 56, padding: "0 20px", flexShrink: 0,
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Zap size={15} color="#0071e3" />
+          <span style={{ fontSize: 15, fontWeight: 500, color: "#f5f5f7" }}>Creator Chat</span>
         </div>
-        
-        {isStreaming && (
-          <span className="text-[10px] uppercase font-bold text-neutral-400 flex items-center gap-1.5 animate-pulse">
-            <RefreshCw className="w-3 h-3 animate-spin text-indigo-500" />
-            LLM is Thinking...
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <motion.span
+            animate={{ scale: [1, 1.3, 1] }}
+            transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+            style={{
+              width: 7, height: 7, borderRadius: "50%",
+              background: isStreaming ? "#0071e3" : "#30d158",
+              display: "inline-block",
+            }}
+          />
+          <span style={{ fontSize: 11, color: "#86868b" }}>
+            Groq · Llama 3.3 70B
           </span>
-        )}
+        </div>
       </div>
 
-      {/* Messages Scroll Area */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-4 scrollbar-thin">
-        {messages.map((msg) => {
-          const isBot = msg.sender === 'bot';
-          return (
-            <div 
-              key={msg.id} 
-              className={`flex flex-col gap-1.5 max-w-[85%] ${isBot ? 'self-start' : 'self-end items-end'}`}
+      {/* ── Messages ── */}
+      <div style={{
+        flex: 1, overflowY: "auto",
+        padding: 16, display: "flex", flexDirection: "column", gap: 12,
+      }}>
+        {/* Empty state */}
+        <AnimatePresence>
+          {messages.length === 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.3 }}
+              style={{
+                flex: 1, display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center",
+                gap: 16, padding: "40px 20px", textAlign: "center",
+              }}
             >
-              {/* Sender Tag */}
-              <span className="text-[9px] font-bold text-neutral-500 uppercase tracking-widest px-1">
-                {isBot ? 'CreatorLens AI' : 'Creator'}
-              </span>
-
-              {/* Message Bubble */}
-              <div className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed border transition-all duration-300 ${
-                isBot 
-                  ? 'bg-neutral-900/60 text-neutral-300 border-white/5 rounded-tl-sm' 
-                  : 'bg-gradient-to-br from-indigo-600/90 to-indigo-700/90 text-white border-indigo-500/10 rounded-tr-sm shadow-lg shadow-indigo-500/5'
-              }`}>
-                <div className="whitespace-pre-line">
-                  {isBot ? formatMessageText(msg.text) : msg.text}
-                </div>
-
-                {/* Inline streaming visual indicator */}
-                {msg.isStreaming && msg.text === "" && (
-                  <div className="flex items-center gap-1 py-1">
-                    <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <span className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  </div>
-                )}
+              {/* Concentric circles icon */}
+              <div style={{ position: "relative", width: 56, height: 56 }}>
+                {[56, 42, 28].map((s, i) => (
+                  <div key={i} style={{
+                    position: "absolute",
+                    top: "50%", left: "50%",
+                    transform: "translate(-50%,-50%)",
+                    width: s, height: s, borderRadius: "50%",
+                    border: `1px solid rgba(255,255,255,${0.06 + i * 0.04})`,
+                  }} />
+                ))}
+                <div style={{
+                  position: "absolute", top: "50%", left: "50%",
+                  transform: "translate(-50%,-50%)",
+                  width: 12, height: 12, borderRadius: "50%",
+                  background: "#0071e3", opacity: 0.6,
+                }} />
               </div>
 
-              {/* Citations block for bot response */}
-              {isBot && msg.citations && msg.citations.length > 0 && (
-                <div className="flex flex-col gap-1.5 mt-1.5 px-1">
-                  <span className="text-[9px] font-extrabold uppercase text-neutral-500 tracking-wider flex items-center gap-1">
-                    <HelpCircle className="w-3 h-3 text-neutral-600" /> Reference Citations
-                  </span>
-                  <div className="flex flex-wrap gap-2 max-w-full">
-                    {msg.citations.map((cit, idx) => {
-                      const isA = cit.video_id === 'A';
-                      const sourceName = isA ? (videoA?.creator || 'Video A') : (videoB?.creator || 'Video B');
-                      
-                      return (
-                        <a
-                          key={idx}
-                          href={cit.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={`text-[10px] font-semibold px-2 py-1 rounded-lg border flex items-center gap-1.5 transition-all duration-200 ${
-                            isA 
-                              ? 'bg-indigo-500/5 text-indigo-400 hover:text-indigo-300 border-indigo-500/10 hover:bg-indigo-500/10' 
-                              : 'bg-purple-500/5 text-purple-400 hover:text-purple-300 border-purple-500/10 hover:bg-purple-500/10'
-                          }`}
-                        >
-                          <PlayCircle className="w-3.5 h-3.5" />
-                          <span>Video {cit.video_id} ({cit.timestamp})</span>
-                          <ExternalLink className="w-2.5 h-2.5 opacity-60" />
-                          
-                          {/* Hover Citation Preview */}
-                          <span className="sr-only">{cit.content}</span>
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+              <p style={{ fontSize: 15, color: "#86868b", margin: 0 }}>
+                Ask anything about the videos
+              </p>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+                {SUGGESTIONS.map((s, i) => (
+                  <motion.button
+                    key={i}
+                    whileHover={{ background: "#1a1a1a", borderColor: "rgba(255,255,255,0.2)" }}
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => handleSend(s)}
+                    style={{
+                      background: "#111111",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: 8, padding: "8px 14px",
+                      fontSize: 12, color: "#cccccc", cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    {s}
+                  </motion.button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Message list */}
+        {messages.map((msg) => (
+          <MessageBubble key={msg.id} message={msg} />
+        ))}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* RAG Suggestions Container */}
-      {messages.length === 1 && !isStreaming && (
-        <div className="px-6 py-3 bg-white/[0.01] border-t border-white/5">
-          <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider block mb-2">
-            Suggested Analysis Questions:
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {SUGGESTIONS.map((sug, idx) => (
-              <button
-                key={idx}
-                onClick={() => handleSend(sug)}
-                className="text-[10px] font-semibold text-neutral-400 hover:text-white bg-white/5 hover:bg-white/10 active:bg-white/15 border border-white/5 hover:border-white/10 px-3 py-1.5 rounded-lg transition-all duration-200 cursor-pointer text-left line-clamp-1"
-              >
-                {sug}
-              </button>
-            ))}
-          </div>
+      {/* ── Quick chips (persistent after first message) ── */}
+      {messages.length > 0 && !isStreaming && (
+        <div style={{
+          padding: "8px 16px",
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+          display: "flex", flexWrap: "wrap", gap: 6,
+        }}>
+          {SUGGESTIONS.slice(0, 3).map((s, i) => (
+            <motion.button
+              key={i}
+              whileHover={{ background: "#1a1a1a" }}
+              whileTap={{ scale: 0.97 }}
+              onClick={() => handleSend(s)}
+              style={{
+                background: "#111111",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 8, padding: "5px 12px",
+                fontSize: 11, color: "#86868b", cursor: "pointer",
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                maxWidth: 200,
+              }}
+            >
+              {s}
+            </motion.button>
+          ))}
         </div>
       )}
 
-      {/* Error Banner */}
-      {error && (
-        <div className="mx-6 my-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-2.5 text-xs text-red-400">
-          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-          <div>
-            <span className="font-bold">Streaming Error:</span> {error}
-          </div>
-        </div>
-      )}
+      {/* ── Input area ── */}
+      <div style={{
+        padding: 12,
+        borderTop: "1px solid rgba(255,255,255,0.08)",
+        display: "flex", gap: 10, alignItems: "flex-end",
+      }}>
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={isStreaming}
+          placeholder={isStreaming ? "Generating response…" : "Ask a question…"}
+          className="apple-focus"
+          style={{
+            flex: 1,
+            background: "#111111",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: 12,
+            padding: "11px 14px",
+            fontSize: 14,
+            color: "#f5f5f7",
+            resize: "none",
+            outline: "none",
+            minHeight: 44,
+            maxHeight: 96,
+            overflowY: "auto",
+            fontFamily: "inherit",
+            lineHeight: 1.5,
+            transition: "border-color 150ms ease",
+          }}
+        />
 
-      {/* Chat Form Area */}
-      <form 
-        onSubmit={(e) => { e.preventDefault(); handleSend(); }}
-        className="p-6 border-t border-white/5 bg-white/[0.01]"
-      >
-        <div className="flex items-center gap-3 bg-neutral-950/80 border border-white/10 rounded-2xl px-4 py-2 hover:border-white/20 focus-within:border-indigo-500 transition duration-300">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={isStreaming}
-            placeholder={isStreaming ? "AI is replying..." : "Ask CreatorLens a strategy question..."}
-            className="flex-1 bg-transparent border-0 text-xs sm:text-sm text-neutral-200 placeholder-neutral-500 outline-none select-text py-2"
-          />
-          <button
-            type="submit"
-            disabled={isStreaming || !input.trim()}
-            className="p-2.5 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-500 text-white cursor-pointer hover:shadow-lg hover:shadow-indigo-500/20 active:scale-95 disabled:opacity-30 disabled:pointer-events-none transition duration-200"
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </div>
-      </form>
+        {/* Send / Stop */}
+        <motion.button
+          whileHover={isStreaming || !isEmpty ? { background: "#0077ed" } : {}}
+          whileTap={isStreaming || !isEmpty ? { scale: 0.93 } : {}}
+          onClick={isStreaming ? stopStream : () => handleSend()}
+          style={{
+            width: 36, height: 36, flexShrink: 0,
+            background: "#0071e3", border: "none", borderRadius: 8,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#ffffff",
+            cursor: isStreaming ? "pointer" : isEmpty ? "default" : "pointer",
+            opacity: !isStreaming && isEmpty ? 0.3 : 1,
+            transition: "opacity 150ms ease",
+            pointerEvents: !isStreaming && isEmpty ? "none" : "auto",
+          }}
+        >
+          {isStreaming ? <Square size={14} /> : <Send size={14} />}
+        </motion.button>
+      </div>
     </div>
   );
 }
