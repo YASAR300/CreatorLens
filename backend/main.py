@@ -1,8 +1,10 @@
 import logging
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.config import settings
-from app.routers import ingest, videos, chat
+from routers.videos import router as videos_router, process_videos
+from routers.chat import router as chat_router
+from models import VideoProcessRequest, ProcessVideosResponse
 
 # Configure logging
 logging.basicConfig(
@@ -13,18 +15,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CreatorLens API",
-    description="RAG-powered social media video analysis dashboard",
+    description="RAG-powered social media video analysis",
     version="1.0.0"
 )
 
 # CORS configurations - Allow Vite and Next.js frontend connections
 origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
     "http://localhost:5173",
+    "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
 ]
 
 app.add_middleware(
@@ -36,9 +36,15 @@ app.add_middleware(
 )
 
 # Register routers
-app.include_router(ingest.router)
-app.include_router(videos.router, prefix="/api/videos", tags=["Videos"])
-app.include_router(chat.router)  # Handles both GET /api/chat, POST /api/chat/stream, and memory resets
+app.include_router(videos_router, prefix="/api/videos", tags=["Videos"])
+app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
+
+# Backward compatibility legacy endpoint /api/ingest
+@app.post("/api/ingest", response_model=ProcessVideosResponse, tags=["Videos"])
+async def ingest_legacy(payload: VideoProcessRequest):
+    """Legacy endpoint delegating to the processed videos handler."""
+    logger.info("Delegating legacy /api/ingest request to process_videos handler")
+    return await process_videos(payload)
 
 @app.on_event("startup")
 async def startup_event():
@@ -46,18 +52,16 @@ async def startup_event():
     logger.info("FastAPI startup: Warming up embedding models...")
     # Simply importing vector_service triggers the module-level HuggingFace model load
     from services.vector_service import embeddings
-    logger.info("Embedding model loaded and ready! Warm-up successful.")
+    logger.info("Embedding model loaded and ready")
 
 @app.get("/health")
 def health_check():
     """Simple API status endpoint."""
     return {
         "status": "healthy",
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.1-70b-versatile",
         "vector_db": "chromadb"
     }
 
 if __name__ == "__main__":
-    import uvicorn
-    logger.info(f"Starting CreatorLens server at {settings.HOST}:{settings.PORT} in {settings.ENV} mode...")
-    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

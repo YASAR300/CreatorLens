@@ -1,16 +1,14 @@
 import json
 import asyncio
 import logging
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from app.models import ChatRequest
+
+from models import ChatRequest
 from services.rag_service import ask_question, reset_memory
 
 logger = logging.getLogger(__name__)
-
-# Base router prefix will be registered as /api/chat or managed in main.py
-# To support all URLs cleanly, we keep prefix empty at router level and register paths explicitly.
-router = APIRouter(prefix="/api/chat", tags=["Chat"])
+router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # Phase 6 Endpoints (SSE Text Stream & POST Requests)
@@ -31,7 +29,7 @@ async def stream_chat(request: ChatRequest):
     
     async def event_generator(message: str):
         queue = asyncio.Queue()
-        # Schedule the ask_question coroutine concurrently in the background
+        # Schedule the ask_question coroutine concurrently in the background as a Task
         task = asyncio.create_task(ask_question(message, queue))
         
         try:
@@ -110,11 +108,6 @@ async def chat_with_bot_legacy(query: str = Query(..., description="The user que
         task = asyncio.create_task(ask_question(message, queue))
         
         try:
-            # Yield citations first to allow instant frontend reference rendering
-            # We await task briefly to get retrieved documents before LLM streams
-            # (or we let citations arrive when the queue yields source documents)
-            citations_sent = False
-            
             while True:
                 try:
                     token = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -126,10 +119,7 @@ async def chat_with_bot_legacy(query: str = Query(..., description="The user que
                     results = await task
                     sources = results.get("source_documents", [])
                     
-                    # Yield citations if we haven't already
-                    if not citations_sent:
-                        yield f"data: {json.dumps({'type': 'citations', 'citations': sources})}\n\n"
-                        
+                    yield f"data: {json.dumps({'type': 'citations', 'citations': sources})}\n\n"
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     break
                 elif token.startswith("[STREAM_ERROR]"):
@@ -137,9 +127,6 @@ async def chat_with_bot_legacy(query: str = Query(..., description="The user que
                     yield f"data: {json.dumps({'type': 'error', 'content': err_msg})}\n\n"
                     break
                 else:
-                    # On first content token, if we haven't sent citations yet, let's grab the task's docs
-                    # Wait, ask_question populates sources after task completes, but Chroma retrieval is fast.
-                    # We can yield content deltas
                     yield f"data: {json.dumps({'type': 'content', 'delta': token})}\n\n"
         except Exception as e:
             logger.error(f"Unexpected legacy streaming error: {str(e)}")
@@ -154,11 +141,3 @@ async def chat_with_bot_legacy(query: str = Query(..., description="The user que
             "X-Accel-Buffering": "no"
         }
     )
-
-@router.post("/reset")
-@router.post("/chat/reset")  # Aliasing /api/chat/reset to support frontend fetch calls
-async def reset_chat_legacy():
-    """Backward compatible endpoint for clearing memory via /api/chat/reset POST."""
-    logger.info("Wiping chat memory via legacy /chat/reset endpoint.")
-    reset_memory()
-    return {"status": "success", "message": "Successfully cleared conversation memory buffer."}
