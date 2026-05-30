@@ -3,7 +3,7 @@ import json
 import logging
 from typing import AsyncGenerator, Dict, Any, List
 from langchain_groq import ChatGroq
-from langchain.memory import ConversationBufferWindowMemory
+from langchain_classic.memory import ConversationBufferWindowMemory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from app.config import settings
 from app.services.vector_store import query_vector_store, reset_db
