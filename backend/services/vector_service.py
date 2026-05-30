@@ -127,24 +127,20 @@ def process_and_store(video_data: dict) -> int:
 
 def clear_collection():
     """
-    Reset ChromaDB database by completely deleting the active collection 
-    and re-instantiating the global Chroma client instance.
+    Surgically clear the ChromaDB collection by deleting all stored document IDs.
+    This preserves the global ChromaDB client instance reference in memory.
     """
-    global chroma_db
-    logger.info("Resetting ChromaDB collection...")
+    logger.info("Resetting ChromaDB collection surgically...")
     try:
-        chroma_db.delete_collection()
-        logger.info("ChromaDB collection successfully deleted.")
+        results = chroma_db.get()
+        all_ids = results.get("ids", [])
+        if all_ids:
+            chroma_db.delete(ids=all_ids)
+            logger.info(f"Surgically deleted {len(all_ids)} document IDs from ChromaDB.")
+        else:
+            logger.info("ChromaDB collection is already empty.")
     except Exception as e:
-        logger.warning(f"Error while deleting ChromaDB collection: {str(e)}")
-        
-    # Re-initialize the global variable to create a fresh collection
-    chroma_db = Chroma(
-        collection_name="creator_lens_transcripts",
-        persist_directory=DB_DIR,
-        embedding_function=embeddings
-    )
-    logger.info("ChromaDB collection successfully re-created and re-initialized.")
+        logger.warning(f"Error surgically clearing ChromaDB collection: {str(e)}")
 
 def retrieve_relevant_chunks(query: str, video_id_filter: str = None, k: int = 5) -> List[Tuple[Document, float]]:
     """
