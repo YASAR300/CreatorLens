@@ -27,6 +27,7 @@ class VideoMetadata(BaseModel):
     duration: str
     thumbnail_url: str
     upload_date: str
+    upload_time: str = ""
     chunks_stored: int
 
 class ProcessVideosResponse(BaseModel):
