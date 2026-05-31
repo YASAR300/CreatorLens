@@ -123,48 +123,55 @@ else:
     embeddings = _FastEmbedWrapper()
 
 # ── Qdrant client ──
+# check_compatibility=False avoids a version-check network round trip at import,
+# keeping startup fast so the web server binds its port promptly.
 qdrant = QdrantClient(
     url=os.getenv("QDRANT_URL"),
     api_key=os.getenv("QDRANT_API_KEY"),
     timeout=30,
+    check_compatibility=False,
 )
 
 
 def _ensure_collection() -> None:
-    """Create the collection once if it doesn't exist."""
-    try:
-        if not qdrant.collection_exists(COLLECTION):
-            qdrant.create_collection(
-                collection_name=COLLECTION,
-                vectors_config=qmodels.VectorParams(
-                    size=EMBED_DIM, distance=qmodels.Distance.COSINE
-                ),
+    """Create the collection + payload indexes once if missing. Idempotent."""
+    if not qdrant.collection_exists(COLLECTION):
+        qdrant.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=qmodels.VectorParams(
+                size=EMBED_DIM, distance=qmodels.Distance.COSINE
+            ),
+        )
+        logger.info("Created Qdrant collection '%s'.", COLLECTION)
+    # Ensure the filter fields are indexed (safe to call repeatedly).
+    for field in ("user_id", "video_id", "analysis_id"):
+        try:
+            qdrant.create_payload_index(
+                COLLECTION, field_name=field,
+                field_schema=qmodels.PayloadSchemaType.KEYWORD,
             )
-            # Index the fields we filter on for fast scoped queries.
-            for field in ("user_id", "video_id", "analysis_id"):
-                try:
-                    qdrant.create_payload_index(
-                        COLLECTION, field_name=field,
-                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
-                    )
-                except Exception:
-                    pass
-            logger.info("Created Qdrant collection '%s'.", COLLECTION)
+        except Exception:
+            pass
+
+
+_collection_ready = False
+
+
+def _ensure_ready() -> None:
+    """
+    Lazily set up the collection on first real use. This keeps module import
+    instant (no network calls), so the web server binds its port immediately —
+    important on slow free-tier hosts where Render scans for an open port.
+    """
+    global _collection_ready
+    if _collection_ready:
+        return
+    try:
+        _ensure_collection()
+        _collection_ready = True
     except Exception as exc:
         logger.error("Could not ensure Qdrant collection: %s", exc)
         raise
-
-
-_ensure_collection()
-
-# Ensure the analysis_id index exists even on a pre-existing collection.
-try:
-    qdrant.create_payload_index(
-        COLLECTION, field_name="analysis_id",
-        field_schema=qmodels.PayloadSchemaType.KEYWORD,
-    )
-except Exception:
-    pass
 
 
 def parse_first_timestamp(text: str) -> str:
@@ -210,6 +217,7 @@ def process_and_store(video_data: dict) -> int:
     Chunk content (overview chunk + transcript chunks), embed, and upsert into
     Qdrant tagged with the current user_id and the video_id (A/B).
     """
+    _ensure_ready()
     user_id = current_user_id.get()
     analysis_id = current_analysis_id.get()
     video_id = video_data.get("video_id", "A")
@@ -277,6 +285,7 @@ def process_and_store(video_data: dict) -> int:
 
 def clear_collection() -> None:
     """Delete the CURRENT user+analysis points (scoped reset)."""
+    _ensure_ready()
     user_id = current_user_id.get()
     analysis_id = current_analysis_id.get()
     try:
@@ -291,6 +300,7 @@ def clear_collection() -> None:
 
 def retrieve_relevant_chunks(query: str, video_id_filter: str = None, k: int = 5) -> List[Tuple[Document, float]]:
     """Top-k semantically relevant chunks for the current user+analysis, optionally one video."""
+    _ensure_ready()
     user_id = current_user_id.get()
     analysis_id = current_analysis_id.get()
     logger.info("Retrieving k=%d for user=%s analysis=%s query='%s' (video=%s)", k, user_id, analysis_id, query, video_id_filter)

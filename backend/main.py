@@ -52,17 +52,27 @@ app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize the database and warm up the embeddings model."""
-    logger.info("FastAPI startup: initializing database...")
-    try:
-        from db import init_db
-        init_db()
-    except Exception as exc:
-        logger.error("DB init failed: %s", exc)
+    """
+    Kick off DB init + warmup in the BACKGROUND so the event loop binds the port
+    immediately (critical on slow free-tier hosts that scan for an open port).
+    Nothing here blocks startup.
+    """
+    import asyncio
 
-    logger.info("Warming up embedding model + Qdrant connection...")
-    from services.vector_service import embeddings  # noqa: F401 (triggers load)
-    logger.info("Embedding model loaded and Qdrant ready.")
+    def _warmup():
+        try:
+            from db import init_db
+            init_db()
+        except Exception as exc:
+            logger.error("DB init failed: %s", exc)
+        try:
+            from services.vector_service import embeddings  # noqa: F401
+            logger.info("Warmup complete (DB + embeddings ready).")
+        except Exception as exc:
+            logger.error("Warmup failed: %s", exc)
+
+    logger.info("FastAPI startup: scheduling background warmup...")
+    asyncio.get_event_loop().run_in_executor(None, _warmup)
 
 
 @app.get("/health")
