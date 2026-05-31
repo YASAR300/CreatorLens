@@ -67,7 +67,18 @@ _BASE_SYSTEM_INSTRUCTION = (
     "4. Cite every factual claim: use [Video A, Metadata] or [Video B, Metadata] for stats, and [Video X, Chunk N] for transcript content.\n"
     "5. Use specific numbers. Never say 'performed better' — say exact figures with percentage-point differences.\n"
     "6. When suggesting improvements, use numbered actionable bullet points.\n"
-    "7. If context is insufficient, say so explicitly rather than speculating or hallucinating numbers.\n\n"
+    "7. If context is insufficient, say so explicitly rather than speculating or hallucinating numbers.\n"
+    "   IMPORTANT: A video's Title and Description/Caption (provided as an [overview] chunk and in metadata) ARE valid "
+    "   content. When asked what a video is 'about', summarize its title, caption/description, and hashtags. "
+    "   Only say information is unavailable if there is genuinely no title, caption, or transcript for that video.\n"
+    "8. BE EXTREMELY DIRECT, CONCISE, AND STRAIGHTFORWARD. Answer the user's question immediately and directly without any conversational filler, introductory preambles (e.g., 'To answer your question...', 'Based on the metadata...', 'Here is the info:'), or polite postambles/closings (e.g., 'Please let me know if...'). Get straight to the point.\n"
+    "9. Do not repeat facts. Avoid duplicate formats (e.g., do not write an explanation and then repeat the exact same stats in a bulleted/numbered list below it). If a direct answer can be given in 1-2 lines, keep it to 1-2 lines.\n"
+    "10. Only suggest improvements, comparative tables, or comprehensive analyses if the user explicitly asks for them. Focus strictly on answering the specific question asked.\n"
+    "11. SCOPE DETECTION for metric questions (engagement rate, views, likes, comments, followers, duration, upload date/time):\n"
+    "    - If the question says 'each', 'both', 'compare', 'vs', or names no single video, you MUST give the value for BOTH Video A AND Video B. Never answer with only one video.\n"
+    "    - If the question names only Video A or only Video B, answer for that one video only.\n"
+    "    - All these metric values are in the Global Video Metadata block — read them directly; do NOT rely on retrieved transcript chunks for numbers.\n"
+    "12. An engagement rate of 0% means views were 0 or unavailable (common for Instagram photo posts). State the 0% value; do not claim the data is missing.\n\n"
 )
 
 def build_system_prompt(video_metadata: dict) -> str:
@@ -84,8 +95,9 @@ def build_system_prompt(video_metadata: dict) -> str:
         f"  Likes         : {meta_a.get('likes', 0):,}\n"
         f"  Comments      : {meta_a.get('comments', 0):,}\n"
         f"  Engagement    : {meta_a.get('engagement_rate', 0.0)}%\n"
-        f"  Duration      : {meta_a.get('duration', 0)}s\n"
+        f"  Duration      : {meta_a.get('duration', 0)}\n"
         f"  Upload Date   : {meta_a.get('upload_date', 'N/A')}\n"
+        f"  Upload Time   : {meta_a.get('upload_time', 'N/A') or 'N/A'}\n"
         f"  Hashtags      : {', '.join(meta_a.get('hashtags', [])) or 'None'}\n"
         f"\nVIDEO B (Instagram Reel):\n"
         f"  Creator       : {meta_b.get('creator', 'N/A')}\n"
@@ -94,8 +106,9 @@ def build_system_prompt(video_metadata: dict) -> str:
         f"  Likes         : {meta_b.get('likes', 0):,}\n"
         f"  Comments      : {meta_b.get('comments', 0):,}\n"
         f"  Engagement    : {meta_b.get('engagement_rate', 0.0)}%\n"
-        f"  Duration      : {meta_b.get('duration', 0)}s\n"
+        f"  Duration      : {meta_b.get('duration', 0)}\n"
         f"  Upload Date   : {meta_b.get('upload_date', 'N/A')}\n"
+        f"  Upload Time   : {meta_b.get('upload_time', 'N/A') or 'N/A'}\n"
         f"  Hashtags      : {', '.join(meta_b.get('hashtags', [])) or 'None'}\n"
         "==============================================\n\n"
     )
@@ -105,7 +118,7 @@ human_message_template = (
     "Retrieved transcript context:\n{context}\n\n"
     "Conversation history:\n{chat_history}\n\n"
     "Creator's question:\n{question}\n\n"
-    "Please provide a detailed analytical response with citations."
+    "Please provide a direct, concise response with citations. Answer the question directly and immediately without any introductory/concluding filler or redundant summaries."
 )
 
 chat_prompt = ChatPromptTemplate.from_messages([
@@ -113,8 +126,28 @@ chat_prompt = ChatPromptTemplate.from_messages([
     ("human", human_message_template)
 ])
 
-# Define custom document formatting prompt to inject metadata into the LLM's context window
+# Custom condense-question prompt.
+# The default LangChain rephraser tends to NARROW a follow-up's scope to match
+# recent turns (e.g. after two Video-B questions, "engagement rate of each" gets
+# rewritten to be about Video B only). This prompt explicitly preserves scope so
+# "each / both / compare" questions keep covering BOTH videos.
 from langchain_core.prompts import PromptTemplate
+
+condense_question_prompt = PromptTemplate.from_template(
+    "Given the conversation so far and a follow-up question, rephrase the follow-up "
+    "into a standalone question.\n"
+    "RULES:\n"
+    "- Only resolve pronouns/references (it, that, this, the video) using the history.\n"
+    "- PRESERVE the original scope exactly:\n"
+    "    * If the follow-up explicitly names a single video (e.g. 'Video A' or 'Video B'), "
+    "the standalone question MUST stay about ONLY that video. Do NOT add the other video.\n"
+    "    * If the follow-up says 'each', 'both', 'compare', 'vs', or names NO specific video, "
+    "the standalone question MUST refer to BOTH Video A and Video B. Never narrow it to one.\n"
+    "- Do not add facts or answer the question. Output only the rephrased question.\n\n"
+    "Chat history:\n{chat_history}\n\n"
+    "Follow-up question: {question}\n"
+    "Standalone question:"
+)
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
 from typing import List
@@ -177,6 +210,7 @@ def _build_rag_chain():
     return ConversationalRetrievalChain.from_llm(
         llm=streaming_llm,
         condense_question_llm=condense_llm,
+        condense_question_prompt=condense_question_prompt,
         retriever=balanced_retriever,
         memory=conversation_memory,
         combine_docs_chain_kwargs={
