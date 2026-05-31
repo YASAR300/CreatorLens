@@ -4,9 +4,10 @@ import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { Eye, Loader2, Mail, Lock } from "lucide-react";
+import { Loader2, Mail, Lock } from "lucide-react";
 import toast from "react-hot-toast";
 import { useAuth } from "../../hooks/useAuth";
+import Logo from "../../components/Logo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -55,10 +56,7 @@ export function AuthShell({ title, subtitle, children }) {
         initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
         style={{ position: "relative", zIndex: 1, width: "100%", maxWidth: 380, background: "rgba(12,12,12,0.8)", backdropFilter: "blur(20px)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 30, boxShadow: "0 24px 70px rgba(0,0,0,0.6)" }}>
         <Link href="/" style={{ display: "flex", alignItems: "center", gap: 9, textDecoration: "none", marginBottom: 22 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 10, background: "linear-gradient(135deg,#0071e3,#30d158)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 12px rgba(0,113,227,0.35)" }}>
-            <Eye size={17} color="#fff" />
-          </div>
-          <span style={{ fontSize: 16, fontWeight: 600, color: "#f5f5f7" }}>CreatorLens</span>
+          <Logo size={30} withWordmark />
         </Link>
         <h1 style={{ fontSize: 24, fontWeight: 600, margin: "0 0 4px", letterSpacing: "-0.4px" }}>{title}</h1>
         <p style={{ fontSize: 14, color: "#86868b", margin: "0 0 22px" }}>{subtitle}</p>
