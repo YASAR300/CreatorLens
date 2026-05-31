@@ -41,10 +41,19 @@ EMBED_DIM = 384  # all-MiniLM-L6-v2
 current_user_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_user_id", default="anonymous"
 )
+# Per-request ACTIVE analysis scope. Lets a user keep many saved comparisons in
+# Qdrant simultaneously and chat against whichever one is currently open.
+current_analysis_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_analysis_id", default="default"
+)
 
 
 def set_current_user(user_id: str) -> None:
     current_user_id.set(user_id or "anonymous")
+
+
+def set_current_analysis(analysis_id: str) -> None:
+    current_analysis_id.set(analysis_id or "default")
 
 
 # ── Text splitter ──
@@ -82,7 +91,7 @@ def _ensure_collection() -> None:
                 ),
             )
             # Index the fields we filter on for fast scoped queries.
-            for field in ("user_id", "video_id"):
+            for field in ("user_id", "video_id", "analysis_id"):
                 try:
                     qdrant.create_payload_index(
                         COLLECTION, field_name=field,
@@ -97,6 +106,15 @@ def _ensure_collection() -> None:
 
 
 _ensure_collection()
+
+# Ensure the analysis_id index exists even on a pre-existing collection.
+try:
+    qdrant.create_payload_index(
+        COLLECTION, field_name="analysis_id",
+        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+    )
+except Exception:
+    pass
 
 
 def parse_first_timestamp(text: str) -> str:
@@ -123,13 +141,15 @@ def _build_content_document(video_data: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _point_id(user_id: str, video_id: str, idx: int) -> str:
+def _point_id(user_id: str, analysis_id: str, video_id: str, idx: int) -> str:
     """Deterministic UUID so re-ingesting the same slot overwrites cleanly."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{user_id}/{video_id}/{idx}"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{user_id}/{analysis_id}/{video_id}/{idx}"))
 
 
-def _user_filter(user_id: str, video_id: str = None) -> qmodels.Filter:
+def _scope_filter(user_id: str, analysis_id: str = None, video_id: str = None) -> qmodels.Filter:
     must = [qmodels.FieldCondition(key="user_id", match=qmodels.MatchValue(value=user_id))]
+    if analysis_id:
+        must.append(qmodels.FieldCondition(key="analysis_id", match=qmodels.MatchValue(value=analysis_id)))
     if video_id:
         must.append(qmodels.FieldCondition(key="video_id", match=qmodels.MatchValue(value=video_id)))
     return qmodels.Filter(must=must)
@@ -141,11 +161,12 @@ def process_and_store(video_data: dict) -> int:
     Qdrant tagged with the current user_id and the video_id (A/B).
     """
     user_id = current_user_id.get()
+    analysis_id = current_analysis_id.get()
     video_id = video_data.get("video_id", "A")
     platform = video_data.get("platform", "youtube")
     creator = video_data.get("creator", "Unknown")
 
-    logger.info("Storing content for user=%s Video %s (%s) by %s", user_id, video_id, platform, creator)
+    logger.info("Storing content for user=%s analysis=%s Video %s (%s) by %s", user_id, analysis_id, video_id, platform, creator)
 
     transcript = video_data.get("transcript", "") or ""
     transcript_missing = (
@@ -154,6 +175,7 @@ def process_and_store(video_data: dict) -> int:
 
     base_meta = {
         "user_id": user_id,
+        "analysis_id": analysis_id,
         "video_id": video_id,
         "platform": platform,
         "creator": creator,
@@ -193,39 +215,41 @@ def process_and_store(video_data: dict) -> int:
         payload = dict(meta)
         payload["page_content"] = text
         points.append(qmodels.PointStruct(
-            id=_point_id(user_id, video_id, meta["chunk_index"]),
+            id=_point_id(user_id, analysis_id, video_id, meta["chunk_index"]),
             vector=vec,
             payload=payload,
         ))
 
     qdrant.upsert(collection_name=COLLECTION, points=points)
-    logger.info("Upserted %d points for user=%s Video %s.", len(points), user_id, video_id)
+    logger.info("Upserted %d points for user=%s analysis=%s Video %s.", len(points), user_id, analysis_id, video_id)
     return len(points)
 
 
 def clear_collection() -> None:
-    """Delete only the CURRENT user's points (per-user reset)."""
+    """Delete the CURRENT user+analysis points (scoped reset)."""
     user_id = current_user_id.get()
+    analysis_id = current_analysis_id.get()
     try:
         qdrant.delete(
             collection_name=COLLECTION,
-            points_selector=qmodels.FilterSelector(filter=_user_filter(user_id)),
+            points_selector=qmodels.FilterSelector(filter=_scope_filter(user_id, analysis_id)),
         )
-        logger.info("Cleared Qdrant points for user=%s.", user_id)
+        logger.info("Cleared Qdrant points for user=%s analysis=%s.", user_id, analysis_id)
     except Exception as exc:
         logger.warning("Error clearing Qdrant points for user=%s: %s", user_id, exc)
 
 
 def retrieve_relevant_chunks(query: str, video_id_filter: str = None, k: int = 5) -> List[Tuple[Document, float]]:
-    """Top-k semantically relevant chunks for the current user, optionally one video."""
+    """Top-k semantically relevant chunks for the current user+analysis, optionally one video."""
     user_id = current_user_id.get()
-    logger.info("Retrieving k=%d for user=%s query='%s' (video=%s)", k, user_id, query, video_id_filter)
+    analysis_id = current_analysis_id.get()
+    logger.info("Retrieving k=%d for user=%s analysis=%s query='%s' (video=%s)", k, user_id, analysis_id, query, video_id_filter)
 
     qvec = embeddings.embed_query(query)
     response = qdrant.query_points(
         collection_name=COLLECTION,
         query=qvec,
-        query_filter=_user_filter(user_id, video_id_filter),
+        query_filter=_scope_filter(user_id, analysis_id, video_id_filter),
         limit=k,
         with_payload=True,
     )

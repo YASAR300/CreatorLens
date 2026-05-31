@@ -42,20 +42,25 @@ condense_llm = ChatGroq(
     groq_api_key=groq_api_key
 )
 
-# Component 2 — Per-user Conversation Memory
-# Each authenticated user gets their own sliding-window buffer so concurrent
-# users never see each other's chat history. Keyed by user_id.
-logger.info("Initializing per-user conversation memory registry (k=5)...")
-_user_memories: Dict[str, ConversationBufferWindowMemory] = {}
+# Component 2 — Per-(user, analysis) Conversation Memory
+# Each open analysis gets its own sliding-window buffer, keyed by
+# "user_id:analysis_id", so switching between saved comparisons keeps separate
+# chat histories and concurrent users never collide.
+logger.info("Initializing per-analysis conversation memory registry (k=5)...")
+_memories: Dict[str, ConversationBufferWindowMemory] = {}
 
 
-def _get_memory(user_id: str) -> ConversationBufferWindowMemory:
-    mem = _user_memories.get(user_id)
+def _scope_key() -> str:
+    return f"{current_user_id.get()}:{current_analysis_id.get()}"
+
+
+def _get_memory(key: str) -> ConversationBufferWindowMemory:
+    mem = _memories.get(key)
     if mem is None:
         mem = ConversationBufferWindowMemory(
             k=5, memory_key="chat_history", return_messages=True, output_key="answer"
         )
-        _user_memories[user_id] = mem
+        _memories[key] = mem
     return mem
 
 # Component 3 — The System Prompt
@@ -84,7 +89,15 @@ _BASE_SYSTEM_INSTRUCTION = (
     "    - If the question says 'each', 'both', 'compare', 'vs', or names no single video, you MUST give the value for BOTH Video A AND Video B. Never answer with only one video.\n"
     "    - If the question names only Video A or only Video B, answer for that one video only.\n"
     "    - All these metric values are in the Global Video Metadata block — read them directly; do NOT rely on retrieved transcript chunks for numbers.\n"
-    "12. An engagement rate of 0% means views were 0 or unavailable (common for Instagram photo posts). State the 0% value; do not claim the data is missing.\n\n"
+    "12. An engagement rate of 0% means views were 0 or unavailable (common for Instagram photo posts). State the 0% value; do not claim the data is missing.\n"
+    "13. OUTPUT FORMATTING (very important — the answer is rendered as Markdown):\n"
+    "    - For any 'suggest / improve / how can I improve / tips / recommendations' question, ALWAYS reply as a clean numbered Markdown list (1., 2., 3.). Each item starts with a SHORT bold lead-in, then a colon, then one concise sentence. Example: '1. **Add a hook**: open with a question in the first 3 seconds to lift retention.'\n"
+    "    - Put each list item on its OWN line. Never run items together in one paragraph. Never start the very first line with '2.' — start at 1.\n"
+    "    - For comparison questions, you may use a short intro line then a numbered or bulleted breakdown per video.\n"
+    "    - Keep simple factual questions to 1-2 plain sentences (no list).\n"
+    "    - Put a blank line between a lead-in sentence and a list.\n"
+    "14. TRANSCRIPT TIMESTAMP CITATIONS: When a claim is based on a transcript chunk that has a timestamp (shown as t=M:SS with type=transcript), cite it as [Video X, M:SS] using that exact timestamp. The frontend turns these into clickable deep links into the video. Use [Video X, Metadata] only for pure metadata facts (views, likes, etc.), and [Video X, overview] for caption/title-derived claims. Do NOT invent timestamps — only cite a timestamp that appears in the provided context.\n"
+    "15. Never wrap the whole answer in a code block. Use Markdown bold (**text**) and numbered lists only.\n\n"
 )
 
 def build_system_prompt(video_metadata: dict) -> str:
@@ -124,7 +137,7 @@ human_message_template = (
     "Retrieved transcript context:\n{context}\n\n"
     "Conversation history:\n{chat_history}\n\n"
     "Creator's question:\n{question}\n\n"
-    "Please provide a direct, concise response with citations. Answer the question directly and immediately without any introductory/concluding filler or redundant summaries."
+    "Answer directly with no filler. If this is an improvement/suggestion request, format as a clean numbered Markdown list where each item is '**Short lead-in**: one sentence.' on its own line. When a claim comes from a timestamped transcript chunk, cite it as [Video X, M:SS] using the exact t= value shown in the context."
 )
 
 chat_prompt = ChatPromptTemplate.from_messages([
@@ -160,9 +173,9 @@ from typing import List
 from pydantic import Field
 
 document_prompt = PromptTemplate(
-    input_variables=["page_content", "video_id", "creator", "views", "likes", "comments", "engagement_rate", "upload_date", "chunk_index"],
+    input_variables=["page_content", "video_id", "creator", "views", "likes", "comments", "engagement_rate", "upload_date", "chunk_index", "timestamp", "content_type"],
     template=(
-        "[Source Video {video_id}, Chunk {chunk_index}]:\n"
+        "[Source Video {video_id}, Chunk {chunk_index}, t={timestamp}, type={content_type}]:\n"
         "Metadata: Creator={creator}, Views={views}, Likes={likes}, Comments={comments}, Engagement Rate={engagement_rate}%, Upload Date={upload_date}\n"
         "Transcript Text: {page_content}"
     )
@@ -196,22 +209,26 @@ class BalancedRetriever(BaseRetriever):
 
 balanced_retriever = BalancedRetriever(k_per_video=3)
 
-# Component 4b — per-user video_metadata store (set by /process after scraping)
-# Keyed by user_id so each account's chat sees only its own videos' metadata.
-from services.vector_service import current_user_id
+# Component 4b — per-(user, analysis) video_metadata store (set by /process)
+# Keyed by "user_id:analysis_id" so each saved comparison keeps its own metadata.
+from services.vector_service import current_user_id, current_analysis_id
 
-_user_metadata: Dict[str, dict] = {}
+_metadata_store: Dict[str, dict] = {}
 
 def set_video_metadata(meta_a: dict, meta_b: dict) -> None:
-    """Store both videos' metadata for the CURRENT user so ask_question can inject it."""
-    uid = current_user_id.get()
-    _user_metadata[uid] = {"A": meta_a, "B": meta_b}
-    logger.info(f"metadata stored for user={uid}: A={meta_a.get('creator')}, B={meta_b.get('creator')}")
+    """Store both videos' metadata for the CURRENT (user, analysis) scope."""
+    key = _scope_key()
+    _metadata_store[key] = {"A": meta_a, "B": meta_b}
+    logger.info(f"metadata stored for scope={key}: A={meta_a.get('creator')}, B={meta_b.get('creator')}")
+
+def has_metadata() -> bool:
+    """Whether metadata exists for the current scope (used to validate loads)."""
+    return _scope_key() in _metadata_store
 
 def _build_rag_chain():
-    """Build a fresh ConversationalRetrievalChain scoped to the current user."""
-    uid = current_user_id.get()
-    system_text = build_system_prompt(_user_metadata.get(uid, {}))
+    """Build a fresh ConversationalRetrievalChain scoped to the current (user, analysis)."""
+    key = _scope_key()
+    system_text = build_system_prompt(_metadata_store.get(key, {}))
     dynamic_prompt = ChatPromptTemplate.from_messages([
         ("system", system_text),
         ("human", human_message_template)
@@ -221,7 +238,7 @@ def _build_rag_chain():
         condense_question_llm=condense_llm,
         condense_question_prompt=condense_question_prompt,
         retriever=balanced_retriever,
-        memory=_get_memory(uid),
+        memory=_get_memory(key),
         combine_docs_chain_kwargs={
             "prompt": dynamic_prompt,
             "document_prompt": document_prompt
@@ -257,6 +274,42 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         logger.error(f"Error during LLM streaming: {str(error)}")
         self.queue.put_nowait(f"[STREAM_ERROR]: {str(error)}")
 
+# ── Deep-link helpers ──
+def _ts_to_seconds(ts: str) -> int:
+    """Convert a 'M:SS' / 'MM:SS' / 'H:MM:SS' timestamp to whole seconds."""
+    try:
+        parts = [int(p) for p in str(ts).strip().split(":")]
+    except Exception:
+        return 0
+    if len(parts) == 3:
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+    if len(parts) == 2:
+        m, s = parts
+        return m * 60 + s
+    return parts[0] if parts else 0
+
+
+def _build_deep_link(url: str, platform: str, ts: str, content_type: str = "transcript") -> str:
+    """
+    Build a URL that jumps to a specific moment of the source video.
+
+    - YouTube supports a `?t=<seconds>s` deep link to seek into the video.
+    - Instagram has no public timestamp-seek param, so we return the post URL.
+    Overview (caption/metadata) chunks have no meaningful timestamp → plain URL.
+    """
+    if not url:
+        return ""
+    if content_type != "transcript":
+        return url
+    seconds = _ts_to_seconds(ts)
+    if platform == "youtube" and seconds > 0:
+        sep = "&" if ("?" in url and "v=" in url) else ("&" if "?" in url else "?")
+        # Strip any existing t= to avoid duplicates
+        return f"{url}{sep}t={seconds}s"
+    return url
+
+
 # The ask_question Function
 async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
     """
@@ -268,16 +321,18 @@ async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
     handler = StreamingCallbackHandler(queue)
     loop = asyncio.get_event_loop()
 
-    # Capture the user scope now; re-apply it inside the executor thread because
+    # Capture the scope now; re-apply it inside the executor thread because
     # ContextVars don't auto-propagate across run_in_executor.
     uid = current_user_id.get()
+    aid = current_analysis_id.get()
 
-    # Build a fresh chain with the current user's metadata baked into the prompt
+    # Build a fresh chain with the current scope's metadata baked into the prompt
     rag_chain = _build_rag_chain()
 
     # Define synchronous call to execute inside thread pool executor
     def run_chain():
-        current_user_id.set(uid)  # ensure the retriever filters by this user
+        current_user_id.set(uid)       # ensure the retriever filters by this user
+        current_analysis_id.set(aid)   # ...and this analysis
         # Pass callbacks parameter directly to the chain call
         return rag_chain(
             {"question": user_message},
@@ -293,14 +348,20 @@ async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
         
         for doc in source_docs:
             meta = doc.metadata
+            ts = meta.get("timestamp", "00:00")
+            url = meta.get("source_url", "")
+            content_type = meta.get("content_type", "transcript")
             formatted_docs.append({
                 "video_id": meta.get("video_id", ""),
                 "chunk_index": meta.get("chunk_index", 0),
                 "platform": meta.get("platform", ""),
                 "creator": meta.get("creator", ""),
                 "engagement_rate": meta.get("engagement_rate", 0.0),
-                "timestamp": meta.get("timestamp", "00:00"),
-                "url": meta.get("source_url", ""),
+                "timestamp": ts,
+                "content_type": content_type,
+                "url": url,
+                # A deep link that jumps to this moment in the source video.
+                "deep_link": _build_deep_link(url, meta.get("platform", ""), ts, content_type),
                 "content": doc.page_content
             })
             
@@ -320,8 +381,8 @@ async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
 
 # The reset_memory Function
 def reset_memory():
-    """Wipe the CURRENT user's sliding-window memory buffer."""
-    uid = current_user_id.get()
-    logger.info("Clearing conversation memory for user=%s...", uid)
-    _get_memory(uid).clear()
-    logger.info("Conversation memory cleared for user=%s.", uid)
+    """Wipe the CURRENT (user, analysis) sliding-window memory buffer."""
+    key = _scope_key()
+    logger.info("Clearing conversation memory for scope=%s...", key)
+    _get_memory(key).clear()
+    logger.info("Conversation memory cleared for scope=%s.", key)
