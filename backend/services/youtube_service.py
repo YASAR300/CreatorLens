@@ -156,9 +156,18 @@ def _fetch_metadata(url: str, video_id: str) -> dict:
     except (ValueError, TypeError):
         upload_date = raw_date or "Unknown"
 
-    # --- Duration: seconds → "4:32" ---
-    duration_secs = info.get("duration") or 0
-    minutes, seconds = divmod(int(duration_secs), 60)
+    # --- Upload time: prefer precise timestamp/release_timestamp (epoch seconds) ---
+    upload_time = ""
+    epoch_ts = info.get("timestamp") or info.get("release_timestamp")
+    if epoch_ts:
+        try:
+            upload_time = datetime.fromtimestamp(int(epoch_ts)).strftime("%H:%M")
+        except (ValueError, TypeError, OSError):
+            upload_time = ""
+
+    # --- Duration: seconds → "4:32" + keep raw seconds ---
+    duration_secs = int(info.get("duration") or 0)
+    minutes, seconds = divmod(duration_secs, 60)
     duration = f"{minutes}:{seconds:02d}"
 
     # --- Thumbnail: always available via predictable CDN URL ---
@@ -166,9 +175,11 @@ def _fetch_metadata(url: str, video_id: str) -> dict:
     thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
 
     title = info.get("title") or "Untitled"
+    description = info.get("description") or ""
 
     return {
         "title": title,
+        "description": description,
         "creator": creator,
         "subscriber_count": subscriber_count,
         "views": views,
@@ -176,7 +187,9 @@ def _fetch_metadata(url: str, video_id: str) -> dict:
         "comments": comments,
         "tags": tags,
         "upload_date": upload_date,
+        "upload_time": upload_time,
         "duration": duration,
+        "duration_seconds": duration_secs,
         "thumbnail_url": thumbnail_url,
     }
 
@@ -249,6 +262,7 @@ def get_youtube_data(url: str) -> dict:
         "platform": "youtube",
         "url": url,
         "title": meta["title"],
+        "description": meta.get("description", ""),
         "transcript": transcript,
         "creator": meta["creator"],
         "subscriber_count": meta["subscriber_count"],
@@ -258,7 +272,9 @@ def get_youtube_data(url: str) -> dict:
         "engagement_rate": engagement_rate,
         "tags": meta["tags"],
         "upload_date": meta["upload_date"],
+        "upload_time": meta["upload_time"],
         "duration": meta["duration"],
+        "duration_seconds": meta["duration_seconds"],
         "thumbnail_url": meta["thumbnail_url"],
     }
 
