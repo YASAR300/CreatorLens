@@ -106,6 +106,7 @@ async def process_videos(request: VideoProcessRequest):
             duration=str(yt_data.get("duration", "0:00")),
             thumbnail_url=f"https://img.youtube.com/vi/{youtube_video_id}/maxresdefault.jpg",
             upload_date=str(yt_data.get("upload_date", "Unknown")),
+            upload_time=str(yt_data.get("upload_time", "")),
             chunks_stored=chunks_a
         )
         
@@ -122,6 +123,7 @@ async def process_videos(request: VideoProcessRequest):
             duration=str(ig_data.get("duration", "0:00")),
             thumbnail_url=ig_data.get("thumbnail_url") or "",
             upload_date=str(ig_data.get("upload_date", "Unknown")),
+            upload_time=str(ig_data.get("upload_time", "")),
             chunks_stored=chunks_b
         )
         
@@ -138,6 +140,7 @@ async def process_videos(request: VideoProcessRequest):
                 "engagement_rate": float(yt_data.get("engagement_rate", 0.0)),
                 "duration": yt_data.get("duration", 0),
                 "upload_date": str(yt_data.get("upload_date", "Unknown")),
+                "upload_time": str(yt_data.get("upload_time", "")),
                 "hashtags": yt_data.get("tags", []),
             },
             meta_b={
@@ -149,6 +152,7 @@ async def process_videos(request: VideoProcessRequest):
                 "engagement_rate": float(ig_data.get("engagement_rate", 0.0)),
                 "duration": ig_data.get("duration", 0),
                 "upload_date": str(ig_data.get("upload_date", "Unknown")),
+                "upload_time": str(ig_data.get("upload_time", "")),
                 "hashtags": ig_data.get("tags", []),
             }
         )
