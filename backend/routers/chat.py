@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from models import ChatRequest
 from services.rag_service import ask_question, reset_memory
-from services.vector_service import set_current_user
+from services.vector_service import set_current_user, set_current_analysis
 from db import User
 from auth import get_current_user
 
@@ -18,7 +18,11 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 @router.post("/stream")
-async def stream_chat(request: ChatRequest, current: User = Depends(get_current_user)):
+async def stream_chat(
+    request: ChatRequest,
+    analysis_id: str = Query("default", description="Which saved analysis to chat against"),
+    current: User = Depends(get_current_user),
+):
     """
     Phase 6 Streaming Chat Endpoint:
     Accepts ChatRequest (message) via POST and returns an SSE text stream.
@@ -29,10 +33,12 @@ async def stream_chat(request: ChatRequest, current: User = Depends(get_current_
     - Stream closure is signalled by: `data: [DONE]\n\n`
     """
     set_current_user(current.id)
-    logger.info(f"[user={current.id}] stream chat: '{request.message}'")
+    set_current_analysis(analysis_id)
+    logger.info(f"[user={current.id} analysis={analysis_id}] stream chat: '{request.message}'")
     
     async def event_generator(message: str):
-        set_current_user(current.id)  # ensure scope inside the streaming task
+        set_current_user(current.id)         # ensure scope inside the streaming task
+        set_current_analysis(analysis_id)
         queue = asyncio.Queue()
         # Schedule the ask_question coroutine concurrently in the background as a Task
         task = asyncio.create_task(ask_question(message, queue))
@@ -86,10 +92,14 @@ async def stream_chat(request: ChatRequest, current: User = Depends(get_current_
     )
 
 @router.post("/reset")
-async def reset_chat(current: User = Depends(get_current_user)):
-    """Wipe the current user's sliding-window chat memory."""
+async def reset_chat(
+    analysis_id: str = Query("default", description="Which analysis's memory to clear"),
+    current: User = Depends(get_current_user),
+):
+    """Wipe the current (user, analysis) sliding-window chat memory."""
     set_current_user(current.id)
-    logger.info(f"[user={current.id}] wiping chat memory via /reset.")
+    set_current_analysis(analysis_id)
+    logger.info(f"[user={current.id} analysis={analysis_id}] wiping chat memory via /reset.")
     reset_memory()
     return {"status": "memory cleared", "message": "Successfully cleared conversation memory buffer."}
 
@@ -100,6 +110,7 @@ async def reset_chat(current: User = Depends(get_current_user)):
 @router.get("")
 async def chat_with_bot_legacy(
     query: str = Query(..., description="The user question for the chatbot"),
+    analysis_id: str = Query("default", description="Which saved analysis to chat against"),
     current: User = Depends(get_current_user),
 ):
     """
@@ -111,10 +122,12 @@ async def chat_with_bot_legacy(
     - Closure: {"type": "done"}
     """
     set_current_user(current.id)
-    logger.info(f"[user={current.id}] legacy GET chat query: '{query}'")
+    set_current_analysis(analysis_id)
+    logger.info(f"[user={current.id} analysis={analysis_id}] legacy GET chat query: '{query}'")
     
     async def legacy_event_generator(message: str):
-        set_current_user(current.id)  # ensure scope inside the streaming task
+        set_current_user(current.id)         # ensure scope inside the streaming task
+        set_current_analysis(analysis_id)
         queue = asyncio.Queue()
         task = asyncio.create_task(ask_question(message, queue))
         

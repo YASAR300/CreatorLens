@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import uuid
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
@@ -9,13 +10,45 @@ from sqlalchemy.orm import Session
 from models import VideoProcessRequest, ProcessVideosResponse, VideoMetadata, AnalysisSummary
 from services.youtube_service import get_youtube_data, extract_video_id
 from services.instagram_service import get_instagram_data
-from services.vector_service import clear_collection, process_and_store, set_current_user
-from services.rag_service import set_video_metadata
+from services.vector_service import clear_collection, process_and_store, set_current_user, set_current_analysis
+from services.rag_service import set_video_metadata, reset_memory
 from db import get_db, User, Analysis
 from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _meta_for_rag(data: dict) -> dict:
+    """Shape scraped video data into the metadata dict the RAG prompt expects."""
+    return {
+        "creator": data.get("creator", "Unknown"),
+        "follower_count": int(data.get("subscriber_count", 0)),
+        "views": int(data.get("views", 0)),
+        "likes": int(data.get("likes", 0)),
+        "comments": int(data.get("comments", 0)),
+        "engagement_rate": float(data.get("engagement_rate", 0.0)),
+        "duration": data.get("duration", 0),
+        "upload_date": str(data.get("upload_date", "Unknown")),
+        "upload_time": str(data.get("upload_time", "")),
+        "hashtags": data.get("tags", []),
+    }
+
+
+def _card_to_rag_meta(card: dict) -> dict:
+    """Rebuild RAG metadata from a saved VideoMetadata card (for loading history)."""
+    return {
+        "creator": card.get("creator", "Unknown"),
+        "follower_count": int(card.get("follower_count", 0)),
+        "views": int(card.get("views", 0)),
+        "likes": int(card.get("likes", 0)),
+        "comments": int(card.get("comments", 0)),
+        "engagement_rate": float(card.get("engagement_rate", 0.0)),
+        "duration": card.get("duration", 0),
+        "upload_date": str(card.get("upload_date", "Unknown")),
+        "upload_time": str(card.get("upload_time", "")),
+        "hashtags": card.get("hashtags", []),
+    }
 
 
 @router.get("/thumbnail-proxy")
@@ -65,6 +98,31 @@ def analysis_history(current: User = Depends(get_current_user), db: Session = De
     ]
 
 
+@router.post("/load/{analysis_id}", response_model=AnalysisSummary)
+def load_analysis(analysis_id: str, current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Re-open a saved analysis: re-hydrate its RAG metadata and reset its chat
+    memory so the user can immediately chat against it. The vectors for this
+    analysis already live in Qdrant (tagged with analysis_id), so retrieval works.
+    """
+    row = db.query(Analysis).filter(Analysis.id == analysis_id, Analysis.user_id == current.id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+
+    set_current_user(current.id)
+    set_current_analysis(row.id)
+    # Rebuild the metadata block the LLM uses, from the saved cards.
+    set_video_metadata(_card_to_rag_meta(row.video_a or {}), _card_to_rag_meta(row.video_b or {}))
+    reset_memory()  # fresh chat for the reopened analysis
+    logger.info("[user=%s] loaded analysis %s", current.id, row.id)
+
+    return AnalysisSummary(
+        id=row.id, youtube_url=row.youtube_url, instagram_url=row.instagram_url,
+        video_a=row.video_a or {}, video_b=row.video_b or {},
+        chunks_stored=row.chunks_stored, created_at=row.created_at.isoformat(),
+    )
+
+
 @router.post("/process", response_model=ProcessVideosResponse)
 async def process_videos(
     request: VideoProcessRequest,
@@ -79,9 +137,12 @@ async def process_videos(
     4. Clear the current user's old vectors in Qdrant.
     5. Chunk, embed, store both transcripts (tagged with user_id), save the analysis.
     """
-    # Scope every vector/memory operation in this request to the authenticated user.
+    # Scope every vector/memory operation in this request to the authenticated
+    # user AND a fresh analysis id (so prior comparisons stay queryable in Qdrant).
+    analysis_id = str(uuid.uuid4())
     set_current_user(current.id)
-    logger.info(f"[user={current.id}] processing YT={request.youtube_url}, IG={request.instagram_url}")
+    set_current_analysis(analysis_id)
+    logger.info(f"[user={current.id} analysis={analysis_id}] processing YT={request.youtube_url}, IG={request.instagram_url}")
     
     try:
         # Extract YouTube Video ID upfront to raise 400 on invalid formats
@@ -110,15 +171,12 @@ async def process_videos(
                 detail="Video processing timed out. Instagram transcription may be slow. Please try again."
             )
             
-        logger.info("Concurrency scraper completed successfully. Storing in ChromaDB...")
-        
-        # 3. Reset existing database surgically (preserves reference in rag_service)
-        clear_collection()
-        
-        # 4. Process and store Video A (YouTube)
+        logger.info("Concurrency scraper completed successfully. Storing vectors in Qdrant...")
+
+        # 3. (No global wipe.) Vectors are tagged with this fresh analysis_id, so
+        #    previous analyses remain intact and queryable.
+        # 4. Process and store Video A (YouTube) and Video B (Instagram)
         chunks_a = process_and_store(yt_data)
-        
-        # 5. Process and store Video B (Instagram)
         chunks_b = process_and_store(ig_data)
         
         # Construct predictable, validated response models
@@ -158,9 +216,10 @@ async def process_videos(
         
         logger.info(f"Ingestion successful! Stored A={chunks_a} chunks, B={chunks_b} chunks.")
 
-        # Persist this analysis for the user's history (best-effort).
+        # Persist this analysis (with our generated id) for the user's history.
         try:
             db.add(Analysis(
+                id=analysis_id,
                 user_id=current.id,
                 youtube_url=request.youtube_url,
                 instagram_url=request.instagram_url,
@@ -172,36 +231,12 @@ async def process_videos(
         except Exception as save_exc:
             db.rollback()
             logger.warning("Could not save analysis history: %s", save_exc)
-        
-        # Inject metadata into the RAG system prompt so the LLM knows creator/follower info for both videos
-        set_video_metadata(
-            meta_a={
-                "creator": yt_data.get("creator", "Unknown"),
-                "follower_count": int(yt_data.get("subscriber_count", 0)),
-                "views": int(yt_data.get("views", 0)),
-                "likes": int(yt_data.get("likes", 0)),
-                "comments": int(yt_data.get("comments", 0)),
-                "engagement_rate": float(yt_data.get("engagement_rate", 0.0)),
-                "duration": yt_data.get("duration", 0),
-                "upload_date": str(yt_data.get("upload_date", "Unknown")),
-                "upload_time": str(yt_data.get("upload_time", "")),
-                "hashtags": yt_data.get("tags", []),
-            },
-            meta_b={
-                "creator": ig_data.get("creator", "Unknown"),
-                "follower_count": int(ig_data.get("subscriber_count", 0)),
-                "views": int(ig_data.get("views", 0)),
-                "likes": int(ig_data.get("likes", 0)),
-                "comments": int(ig_data.get("comments", 0)),
-                "engagement_rate": float(ig_data.get("engagement_rate", 0.0)),
-                "duration": ig_data.get("duration", 0),
-                "upload_date": str(ig_data.get("upload_date", "Unknown")),
-                "upload_time": str(ig_data.get("upload_time", "")),
-                "hashtags": ig_data.get("tags", []),
-            }
-        )
-        
+
+        # Inject metadata into the RAG system prompt for this analysis scope.
+        set_video_metadata(meta_a=_meta_for_rag(yt_data), meta_b=_meta_for_rag(ig_data))
+
         return ProcessVideosResponse(
+            analysis_id=analysis_id,
             video_a=video_a_meta,
             video_b=video_b_meta
         )

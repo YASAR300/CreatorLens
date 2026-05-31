@@ -31,6 +31,7 @@ class VideoMetadata(BaseModel):
     chunks_stored: int
 
 class ProcessVideosResponse(BaseModel):
+    analysis_id: str = ""
     video_a: VideoMetadata
     video_b: VideoMetadata
 
