@@ -6,7 +6,6 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.callbacks import BaseCallbackHandler
 from app.config import settings
-from services.vector_service import chroma_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -43,14 +42,21 @@ condense_llm = ChatGroq(
     groq_api_key=groq_api_key
 )
 
-# Component 2 — Conversation Memory Setup (Initialized globally for persistence)
-logger.info("Initializing ConversationBufferWindowMemory (k=5)...")
-conversation_memory = ConversationBufferWindowMemory(
-    k=5,
-    memory_key="chat_history",
-    return_messages=True,
-    output_key="answer"
-)
+# Component 2 — Per-user Conversation Memory
+# Each authenticated user gets their own sliding-window buffer so concurrent
+# users never see each other's chat history. Keyed by user_id.
+logger.info("Initializing per-user conversation memory registry (k=5)...")
+_user_memories: Dict[str, ConversationBufferWindowMemory] = {}
+
+
+def _get_memory(user_id: str) -> ConversationBufferWindowMemory:
+    mem = _user_memories.get(user_id)
+    if mem is None:
+        mem = ConversationBufferWindowMemory(
+            k=5, memory_key="chat_history", return_messages=True, output_key="answer"
+        )
+        _user_memories[user_id] = mem
+    return mem
 
 # Component 3 — The System Prompt
 # NOTE: video_metadata_summary is injected dynamically per-request via build_system_prompt()
@@ -190,19 +196,22 @@ class BalancedRetriever(BaseRetriever):
 
 balanced_retriever = BalancedRetriever(k_per_video=3)
 
-# Component 4b — video_metadata store (set by the /process endpoint after scraping)
-# This dict is populated by set_video_metadata() and read in ask_question().
-video_metadata_store: dict = {}
+# Component 4b — per-user video_metadata store (set by /process after scraping)
+# Keyed by user_id so each account's chat sees only its own videos' metadata.
+from services.vector_service import current_user_id
+
+_user_metadata: Dict[str, dict] = {}
 
 def set_video_metadata(meta_a: dict, meta_b: dict) -> None:
-    """Store metadata for both videos so every ask_question call can inject it into the prompt."""
-    video_metadata_store["A"] = meta_a
-    video_metadata_store["B"] = meta_b
-    logger.info(f"video_metadata_store updated: A={meta_a.get('creator')}, B={meta_b.get('creator')}")
+    """Store both videos' metadata for the CURRENT user so ask_question can inject it."""
+    uid = current_user_id.get()
+    _user_metadata[uid] = {"A": meta_a, "B": meta_b}
+    logger.info(f"metadata stored for user={uid}: A={meta_a.get('creator')}, B={meta_b.get('creator')}")
 
 def _build_rag_chain():
-    """Build a fresh ConversationalRetrievalChain with the current video metadata injected."""
-    system_text = build_system_prompt(video_metadata_store)
+    """Build a fresh ConversationalRetrievalChain scoped to the current user."""
+    uid = current_user_id.get()
+    system_text = build_system_prompt(_user_metadata.get(uid, {}))
     dynamic_prompt = ChatPromptTemplate.from_messages([
         ("system", system_text),
         ("human", human_message_template)
@@ -212,7 +221,7 @@ def _build_rag_chain():
         condense_question_llm=condense_llm,
         condense_question_prompt=condense_question_prompt,
         retriever=balanced_retriever,
-        memory=conversation_memory,
+        memory=_get_memory(uid),
         combine_docs_chain_kwargs={
             "prompt": dynamic_prompt,
             "document_prompt": document_prompt
@@ -258,12 +267,17 @@ async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
     logger.info(f"Querying RAG chain with user message: '{user_message}'")
     handler = StreamingCallbackHandler(queue)
     loop = asyncio.get_event_loop()
-    
-    # Build a fresh chain with the current video metadata baked into the system prompt
+
+    # Capture the user scope now; re-apply it inside the executor thread because
+    # ContextVars don't auto-propagate across run_in_executor.
+    uid = current_user_id.get()
+
+    # Build a fresh chain with the current user's metadata baked into the prompt
     rag_chain = _build_rag_chain()
-    
+
     # Define synchronous call to execute inside thread pool executor
     def run_chain():
+        current_user_id.set(uid)  # ensure the retriever filters by this user
         # Pass callbacks parameter directly to the chain call
         return rag_chain(
             {"question": user_message},
@@ -306,7 +320,8 @@ async def ask_question(user_message: str, queue: asyncio.Queue) -> dict:
 
 # The reset_memory Function
 def reset_memory():
-    """Wipe the sliding window memory buffer to start a fresh chat session."""
-    logger.info("Clearing conversation memory...")
-    conversation_memory.clear()
-    logger.info("Conversation memory cleared successfully.")
+    """Wipe the CURRENT user's sliding-window memory buffer."""
+    uid = current_user_id.get()
+    logger.info("Clearing conversation memory for user=%s...", uid)
+    _get_memory(uid).clear()
+    logger.info("Conversation memory cleared for user=%s.", uid)

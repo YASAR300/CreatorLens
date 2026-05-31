@@ -2,9 +2,10 @@ import logging
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers.videos import router as videos_router, process_videos
+
+from routers.videos import router as videos_router
 from routers.chat import router as chat_router
-from models import VideoProcessRequest, ProcessVideosResponse
+from routers.auth_router import router as auth_router
 
 # Configure logging
 logging.basicConfig(
@@ -15,16 +16,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CreatorLens API",
-    description="RAG-powered social media video analysis",
-    version="1.0.0"
+    description="Multi-user RAG-powered social media video analysis (Qdrant + Postgres)",
+    version="2.0.0"
 )
 
-# CORS configurations - Allow Vite and Next.js frontend connections
+# CORS — credentials enabled so the httpOnly auth cookie flows cross-origin.
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 app.add_middleware(
@@ -36,32 +39,36 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(auth_router)  # /api/auth/*
 app.include_router(videos_router, prefix="/api/videos", tags=["Videos"])
 app.include_router(chat_router, prefix="/api/chat", tags=["Chat"])
 
-# Backward compatibility legacy endpoint /api/ingest
-@app.post("/api/ingest", response_model=ProcessVideosResponse, tags=["Videos"])
-async def ingest_legacy(payload: VideoProcessRequest):
-    """Legacy endpoint delegating to the processed videos handler."""
-    logger.info("Delegating legacy /api/ingest request to process_videos handler")
-    return await process_videos(payload)
 
 @app.on_event("startup")
 async def startup_event():
-    """Warm up the HuggingFace embeddings model at server startup."""
-    logger.info("FastAPI startup: Warming up embedding models...")
-    # Simply importing vector_service triggers the module-level HuggingFace model load
-    from services.vector_service import embeddings
-    logger.info("Embedding model loaded and ready")
+    """Initialize the database and warm up the embeddings model."""
+    logger.info("FastAPI startup: initializing database...")
+    try:
+        from db import init_db
+        init_db()
+    except Exception as exc:
+        logger.error("DB init failed: %s", exc)
+
+    logger.info("Warming up embedding model + Qdrant connection...")
+    from services.vector_service import embeddings  # noqa: F401 (triggers load)
+    logger.info("Embedding model loaded and Qdrant ready.")
+
 
 @app.get("/health")
 def health_check():
     """Simple API status endpoint."""
     return {
         "status": "healthy",
-        "model": "llama-3.1-70b-versatile",
-        "vector_db": "chromadb"
+        "model": "llama-3.3-70b-versatile",
+        "vector_db": "qdrant",
+        "database": "postgres",
     }
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

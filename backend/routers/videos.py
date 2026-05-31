@@ -1,15 +1,18 @@
 import logging
 import asyncio
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from instaloader.exceptions import InstaloaderException
+from sqlalchemy.orm import Session
 
-from models import VideoProcessRequest, ProcessVideosResponse, VideoMetadata
+from models import VideoProcessRequest, ProcessVideosResponse, VideoMetadata, AnalysisSummary
 from services.youtube_service import get_youtube_data, extract_video_id
 from services.instagram_service import get_instagram_data
-from services.vector_service import clear_collection, process_and_store
+from services.vector_service import clear_collection, process_and_store, set_current_user
 from services.rag_service import set_video_metadata
+from db import get_db, User, Analysis
+from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,17 +45,43 @@ async def thumbnail_proxy(url: str = Query(..., description="CDN image URL to pr
         raise HTTPException(status_code=502, detail="Could not retrieve thumbnail image.")
 
 
+@router.get("/history", response_model=list[AnalysisSummary])
+def analysis_history(current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the current user's saved analyses, most recent first."""
+    rows = (
+        db.query(Analysis)
+        .filter(Analysis.user_id == current.id)
+        .order_by(Analysis.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        AnalysisSummary(
+            id=r.id, youtube_url=r.youtube_url, instagram_url=r.instagram_url,
+            video_a=r.video_a or {}, video_b=r.video_b or {},
+            chunks_stored=r.chunks_stored, created_at=r.created_at.isoformat(),
+        )
+        for r in rows
+    ]
+
+
 @router.post("/process", response_model=ProcessVideosResponse)
-async def process_videos(request: VideoProcessRequest):
+async def process_videos(
+    request: VideoProcessRequest,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
-    Ingestion Pipeline Endpoint:
+    Ingestion Pipeline Endpoint (per-user):
     1. Parse and validate YouTube & Instagram Reel URLs.
-    2. Extract metadata and transcripts concurrently using run_in_executor to avoid blocking the event loop.
-    3. Impose timeout protection (120 seconds) for slow Instagram transcriptions.
-    4. Clear old ChromaDB collection surgically to keep the persistent connection.
-    5. Chunk, embed, and store both transcripts, returning metadata and chunks stored count.
+    2. Extract metadata and transcripts concurrently (run_in_executor).
+    3. Timeout protection (120s) for slow Instagram transcriptions.
+    4. Clear the current user's old vectors in Qdrant.
+    5. Chunk, embed, store both transcripts (tagged with user_id), save the analysis.
     """
-    logger.info(f"Received video processing request: YT={request.youtube_url}, IG={request.instagram_url}")
+    # Scope every vector/memory operation in this request to the authenticated user.
+    set_current_user(current.id)
+    logger.info(f"[user={current.id}] processing YT={request.youtube_url}, IG={request.instagram_url}")
     
     try:
         # Extract YouTube Video ID upfront to raise 400 on invalid formats
@@ -128,6 +157,21 @@ async def process_videos(request: VideoProcessRequest):
         )
         
         logger.info(f"Ingestion successful! Stored A={chunks_a} chunks, B={chunks_b} chunks.")
+
+        # Persist this analysis for the user's history (best-effort).
+        try:
+            db.add(Analysis(
+                user_id=current.id,
+                youtube_url=request.youtube_url,
+                instagram_url=request.instagram_url,
+                video_a=video_a_meta.model_dump(),
+                video_b=video_b_meta.model_dump(),
+                chunks_stored=chunks_a + chunks_b,
+            ))
+            db.commit()
+        except Exception as save_exc:
+            db.rollback()
+            logger.warning("Could not save analysis history: %s", save_exc)
         
         # Inject metadata into the RAG system prompt so the LLM knows creator/follower info for both videos
         set_video_metadata(
@@ -161,7 +205,7 @@ async def process_videos(request: VideoProcessRequest):
             video_a=video_a_meta,
             video_b=video_b_meta
         )
-        
+    
     except HTTPException as http_ex:
         # Re-raise explicit HTTPExceptions
         raise http_ex
