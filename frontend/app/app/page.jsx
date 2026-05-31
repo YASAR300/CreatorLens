@@ -1,9 +1,12 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { Eye, RefreshCw, Loader2, CheckCircle, BarChart3, LogOut, Clock3, ChevronDown } from "lucide-react";
+import {
+  Loader2, CheckCircle, BarChart3, LogOut,
+  Plus, Inbox, Star, Sparkles, ChevronRight,
+} from "lucide-react";
 import toast from "react-hot-toast";
 import VideoCard from "../../components/VideoCard";
 import SkeletonVideoCard from "../../components/SkeletonVideoCard";
@@ -11,18 +14,33 @@ import ChatInterface from "../../components/ChatInterface";
 import ProcessingBar from "../../components/ProcessingBar";
 import { useVideoProcessor } from "../../hooks/useVideoProcessor";
 import { useAuth } from "../../hooks/useAuth";
-import { resetChat, fetchHistory } from "../../lib/api";
+import Logo from "../../components/Logo";
+import { resetChat, fetchHistory, loadAnalysis } from "../../lib/api";
 
 const LAST_KEY = "creatorlens_last_analysis";
 
+/* Linear-style palette */
+const C = {
+  bg: "#08090a",
+  sidebar: "#0b0c0d",
+  panel: "#0e0f11",
+  panel2: "#121315",
+  border: "rgba(255,255,255,0.08)",
+  borderSoft: "rgba(255,255,255,0.05)",
+  text: "#f7f8f8",
+  dim: "#8a8f98",
+  dimmer: "#62666d",
+  blue: "#5e6ad2",
+};
+
 const YoutubeInputIcon = () => (
-  <svg viewBox="0 0 24 24" fill="#ff3333" width="15" height="15">
+  <svg viewBox="0 0 24 24" fill="#ff3333" width="14" height="14">
     <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108C24 15.97 24 12 24 12s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
   </svg>
 );
 
 const InstagramInputIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" width="15" height="15">
+  <svg viewBox="0 0 24 24" fill="none" width="14" height="14">
     <defs>
       <linearGradient id="ig" x1="0" y1="1" x2="1" y2="0">
         <stop offset="0%" stopColor="#fcb045" />
@@ -44,14 +62,16 @@ export default function Dashboard() {
     youtubeUrl, setYoutubeUrl,
     instagramUrl, setInstagramUrl,
     isProcessing, processingStep,
-    videoA, videoB, videosLoaded,
-    analyze, reset,
+    videoA, videoB,
+    analyze, reset, loadVideos,
   } = useVideoProcessor();
 
   const [isResetting, setIsResetting] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [history, setHistory] = useState([]);
-  // Last analysis snapshot from localStorage (lazy init — no effect needed).
+  const [view, setView] = useState("comparison");   // comparison | history | insights
+  const [activeId, setActiveId] = useState(null);    // currently open analysis id
+  const [loadingId, setLoadingId] = useState(null);   // history item being opened
+  const [loadingHistory, setLoadingHistory] = useState(true);
   const [restored] = useState(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -63,45 +83,79 @@ export default function Dashboard() {
   });
   const chatRef = useRef(null);
 
-  // Route guard: bounce unauthenticated visitors to /login.
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
 
-  // Load server-side history once authenticated.
+  const refreshHistory = useCallback(() => {
+    setLoadingHistory(true);
+    fetchHistory()
+      .then(setHistory)
+      .catch(() => {})
+      .finally(() => setLoadingHistory(false));
+  }, []);
+
   useEffect(() => {
-    if (user) {
-      fetchHistory().then(setHistory).catch(() => {});
-    }
+    if (!user) return;
+    let cancelled = false;
+    // loadingHistory defaults to true; just fetch and settle it.
+    fetchHistory()
+      .then((rows) => { if (!cancelled) setHistory(rows); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoadingHistory(false); });
+    return () => { cancelled = true; };
   }, [user]);
 
-  // Persist the latest analysis snapshot whenever it changes.
   useEffect(() => {
     if (videoA && videoB) {
-      try {
-        localStorage.setItem(LAST_KEY, JSON.stringify({ videoA, videoB, ts: Date.now() }));
-      } catch { /* ignore */ }
+      try { localStorage.setItem(LAST_KEY, JSON.stringify({ videoA, videoB, ts: Date.now() })); } catch { /* ignore */ }
     }
   }, [videoA, videoB]);
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
+    if (isProcessing) return; // guard double submit
+    setView("comparison");
     chatRef.current?.clearChat();
-    try { await resetChat(); } catch { /* non-fatal */ }
-    analyze(() => {
-      // refresh history after a successful run
-      fetchHistory().then(setHistory).catch(() => {});
+    analyze(async (data) => {
+      // point chat at the freshly created analysis and refresh history
+      setActiveId(data.analysis_id || null);
+      chatRef.current?.setAnalysisId(data.analysis_id || "default");
+      try { await resetChat(data.analysis_id || "default"); } catch { /* ignore */ }
+      refreshHistory();
     });
   };
 
+  // Open a saved analysis: load cards, re-hydrate RAG, point chat at it.
+  const handleOpenAnalysis = useCallback(async (item) => {
+    if (loadingId || isProcessing) return; // prevent repeat clicks
+    setLoadingId(item.id);
+    setView("comparison");
+    try {
+      const full = await loadAnalysis(item.id);
+      loadVideos(full.video_a, full.video_b);
+      setActiveId(full.id);
+      chatRef.current?.clearChat();
+      chatRef.current?.setAnalysisId(full.id);
+      toast.success("Analysis loaded.");
+    } catch (err) {
+      toast.error(err?.message || "Could not load analysis.");
+    } finally {
+      setLoadingId(null);
+    }
+  }, [loadingId, isProcessing, loadVideos]);
+
   const handleReset = async () => {
+    if (isResetting) return;
     setIsResetting(true);
     try {
-      await resetChat();
+      await resetChat(activeId || "default");
       chatRef.current?.clearChat();
       reset();
+      setActiveId(null);
+      setView("comparison");
       try { localStorage.removeItem(LAST_KEY); } catch { /* ignore */ }
-      toast.success("Session reset.");
+      toast.success("New comparison ready.");
     } catch {
       toast.error("Failed to reset.");
     } finally {
@@ -110,51 +164,33 @@ export default function Dashboard() {
   };
 
   const handleLogout = async () => {
+    if (isResetting) return;
     await logout();
     router.replace("/login");
   };
 
   const hasData = !!(videoA && videoB);
-  const showDashboard = hasData || isProcessing;
-
+  const showWork = hasData || isProcessing;
   const winner =
     hasData && videoA.engagement_rate !== videoB.engagement_rate
       ? (videoA.engagement_rate > videoB.engagement_rate ? "A" : "B")
       : null;
 
   const inputBase = {
-    flex: 1,
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 12,
-    padding: "0 14px 0 40px",
-    height: 42,
-    fontSize: 14,
-    color: "#f5f5f7",
-    outline: "none",
-    width: "100%",
-    fontFamily: "inherit",
-    transition: "border-color 150ms ease, box-shadow 150ms ease, background 150ms ease",
+    flex: 1, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 9,
+    padding: "0 12px 0 36px", height: 38, fontSize: 13.5, color: C.text,
+    outline: "none", width: "100%", fontFamily: "inherit",
+    transition: "border-color 150ms ease, box-shadow 150ms ease",
   };
-
   const focusHandlers = {
-    onFocus: (e) => {
-      e.currentTarget.style.boxShadow = "0 0 0 3px rgba(0,113,227,0.3)";
-      e.currentTarget.style.borderColor = "rgba(0,113,227,0.5)";
-      e.currentTarget.style.background = "rgba(255,255,255,0.07)";
-    },
-    onBlur: (e) => {
-      e.currentTarget.style.boxShadow = "none";
-      e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-      e.currentTarget.style.background = "rgba(255,255,255,0.05)";
-    },
+    onFocus: (e) => { e.currentTarget.style.boxShadow = "0 0 0 3px rgba(94,106,210,0.25)"; e.currentTarget.style.borderColor = "rgba(94,106,210,0.5)"; },
+    onBlur: (e) => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.borderColor = C.border; },
   };
 
-  // While auth is resolving (or redirecting), show a minimal loader.
   if (loading || !user) {
     return (
-      <div style={{ height: "100vh", background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <Loader2 size={22} color="#0071e3" style={{ animation: "spin 1s linear infinite" }} />
+      <div style={{ height: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Loader2 size={22} color={C.blue} style={{ animation: "spin 1s linear infinite" }} />
         <style>{`@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`}</style>
       </div>
     );
@@ -162,260 +198,282 @@ export default function Dashboard() {
 
   const initials = (user.name || user.email || "?").trim().charAt(0).toUpperCase();
 
+  const navItems = [
+    { key: "comparison", icon: BarChart3, label: "Comparison" },
+    { key: "history", icon: Inbox, label: "History" },
+    { key: "insights", icon: Sparkles, label: "Insights" },
+  ];
+
   return (
-    <div className="app-shell" style={{ height: "100vh", background: "#000", color: "#f5f5f7", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <div aria-hidden="true" style={{
-        position: "fixed", top: -180, left: "50%", transform: "translateX(-50%)",
-        width: 900, height: 360, pointerEvents: "none", zIndex: 0,
-        background: "radial-gradient(ellipse at center, rgba(0,113,227,0.10), transparent 70%)",
-        filter: "blur(20px)",
-      }} />
+    <div className="dash-shell" style={{ height: "100vh", background: C.bg, color: C.text, display: "grid", gridTemplateColumns: "232px 1fr 400px", overflow: "hidden" }}>
 
-      {/* ══ TOP BAR ══ */}
-      <div style={{
-        background: "rgba(10,10,10,0.72)",
-        backdropFilter: "saturate(180%) blur(20px)",
-        WebkitBackdropFilter: "saturate(180%) blur(20px)",
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
-        position: "sticky", top: 0, zIndex: 40, flexShrink: 0,
-      }}>
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "0 22px", height: 54,
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: 10,
-              background: "linear-gradient(135deg,#0071e3,#30d158)",
-              display: "flex", alignItems: "center", justifyContent: "center", color: "#fff",
-              boxShadow: "0 2px 12px rgba(0,113,227,0.35)",
-            }}>
-              <Eye size={17} />
-            </div>
-            <span style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7", letterSpacing: "-0.2px" }}>CreatorLens</span>
-            <span className="text-label-uppercase" style={{
-              fontSize: 9.5, color: "#86868b",
-              background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 6, padding: "2px 7px",
-            }}>RAG v2.0</span>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {hasData && (
-              <motion.button
-                whileHover={{ background: "rgba(255,255,255,0.08)", color: "#f5f5f7" }}
-                whileTap={{ scale: 0.97 }}
-                onClick={handleReset}
-                disabled={isResetting}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6, padding: "6px 14px",
-                  background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 9, fontSize: 12, fontWeight: 500, color: "#86868b",
-                  cursor: "pointer", fontFamily: "inherit",
-                }}
-              >
-                <RefreshCw size={13} />
-                {isResetting ? "Resetting…" : "Reset Session"}
-              </motion.button>
-            )}
-
-            {/* User menu */}
-            <div style={{ position: "relative" }}>
-              <button
-                onClick={() => setMenuOpen((v) => !v)}
-                style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 9, padding: "5px 10px 5px 6px", cursor: "pointer", fontFamily: "inherit",
-                }}
-              >
-                <span style={{
-                  width: 24, height: 24, borderRadius: "50%",
-                  background: "linear-gradient(135deg,#0071e3,#30d158)", color: "#fff",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 12, fontWeight: 600,
-                }}>{initials}</span>
-                <span style={{ fontSize: 12, color: "#f5f5f7", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {user.name || user.email}
-                </span>
-                <ChevronDown size={13} color="#86868b" />
-              </button>
-
-              <AnimatePresence>
-                {menuOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -6, scale: 0.98 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: -6, scale: 0.98 }}
-                    transition={{ duration: 0.15 }}
-                    style={{
-                      position: "absolute", right: 0, top: 42, width: 280, zIndex: 50,
-                      background: "#141414", border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: 12, boxShadow: "0 12px 48px rgba(0,0,0,0.7)", overflow: "hidden",
-                    }}
-                  >
-                    <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#f5f5f7" }}>{user.name || "Creator"}</div>
-                      <div style={{ fontSize: 12, color: "#86868b", overflow: "hidden", textOverflow: "ellipsis" }}>{user.email}</div>
-                    </div>
-
-                    <div style={{ maxHeight: 220, overflowY: "auto" }}>
-                      <div className="text-label-uppercase" style={{ fontSize: 9.5, color: "#48484a", padding: "10px 14px 4px", display: "flex", alignItems: "center", gap: 5 }}>
-                        <Clock3 size={11} /> Recent analyses
-                      </div>
-                      {history.length === 0 ? (
-                        <div style={{ fontSize: 12, color: "#86868b", padding: "4px 14px 10px" }}>No saved analyses yet.</div>
-                      ) : (
-                        history.slice(0, 6).map((h) => (
-                          <div key={h.id} style={{ padding: "7px 14px", fontSize: 12, color: "#cccccc", borderTop: "1px solid rgba(255,255,255,0.03)" }}>
-                            <span style={{ color: "#f5f5f7", fontWeight: 500 }}>{h.video_a?.creator || "?"}</span>
-                            <span style={{ color: "#48484a" }}> vs </span>
-                            <span style={{ color: "#f5f5f7", fontWeight: 500 }}>{h.video_b?.creator || "?"}</span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    <button
-                      onClick={handleLogout}
-                      style={{
-                        width: "100%", display: "flex", alignItems: "center", gap: 8,
-                        padding: "11px 14px", background: "transparent", border: "none",
-                        borderTop: "1px solid rgba(255,255,255,0.06)",
-                        color: "#ff453a", fontSize: 13, cursor: "pointer", fontFamily: "inherit",
-                      }}
-                    >
-                      <LogOut size={14} /> Log out
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          </div>
+      {/* ════════ LEFT SIDEBAR ════════ */}
+      <aside className="dash-sidebar" style={{ background: C.sidebar, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ padding: "14px 14px 10px", display: "flex", alignItems: "center", gap: 9 }}>
+          <Logo size={24} withWordmark />
         </div>
 
-        {/* URL form row */}
-        <form onSubmit={handleAnalyze} style={{
-          display: "flex", alignItems: "center", gap: 10,
-          padding: "14px 22px", borderTop: "1px solid rgba(255,255,255,0.04)",
-        }}>
+        <div style={{ padding: "6px 10px" }}>
+          <button onClick={handleReset} disabled={isResetting || isProcessing}
+            style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, fontWeight: 500, cursor: (isResetting || isProcessing) ? "not-allowed" : "pointer", opacity: (isResetting || isProcessing) ? 0.6 : 1, fontFamily: "inherit" }}>
+            {isResetting ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Plus size={14} />}
+            {isResetting ? "Resetting…" : "New comparison"}
+          </button>
+        </div>
+
+        <nav style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 2 }}>
+          {navItems.map((n) => {
+            const active = view === n.key;
+            return (
+              <button key={n.key} onClick={() => setView(n.key)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 9, padding: "7px 10px", borderRadius: 7,
+                  fontSize: 13, color: active ? C.text : C.dim, textAlign: "left",
+                  background: active ? "rgba(255,255,255,0.06)" : "transparent", cursor: "pointer",
+                  border: "none", fontFamily: "inherit", width: "100%",
+                }}>
+                <n.icon size={15} color={active ? C.blue : C.dim} /> {n.label}
+                {n.key === "history" && history.length > 0 && (
+                  <span style={{ marginLeft: "auto", fontSize: 11, color: C.dimmer }}>{history.length}</span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div style={{ padding: "14px 16px 6px" }}>
+          <div className="text-label-uppercase" style={{ fontSize: 10, color: C.dimmer, letterSpacing: "0.6px" }}>Recent</div>
+        </div>
+        <div className="scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 10px" }}>
+          {loadingHistory ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: C.dimmer, padding: "6px 10px" }}>
+              <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Loading…
+            </div>
+          ) : history.length === 0 ? (
+            <div style={{ fontSize: 12, color: C.dimmer, padding: "4px 10px" }}>No analyses yet.</div>
+          ) : (
+            history.slice(0, 20).map((h) => {
+              const isActive = activeId === h.id;
+              const isLoading = loadingId === h.id;
+              return (
+                <button key={h.id} onClick={() => handleOpenAnalysis(h)}
+                  disabled={!!loadingId || isProcessing}
+                  title={`${h.video_a?.creator || "?"} vs ${h.video_b?.creator || "?"}`}
+                  style={{
+                    width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+                    borderRadius: 7, cursor: (loadingId || isProcessing) ? "wait" : "pointer",
+                    color: isActive ? C.text : C.dim, fontSize: 12.5, textAlign: "left",
+                    background: isActive ? "rgba(94,106,210,0.12)" : "transparent",
+                    border: isActive ? "1px solid rgba(94,106,210,0.25)" : "1px solid transparent",
+                    fontFamily: "inherit", opacity: (loadingId && !isLoading) ? 0.5 : 1,
+                  }}>
+                  {isLoading
+                    ? <Loader2 size={12} color={C.blue} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
+                    : <Star size={12} color={isActive ? C.blue : C.dimmer} style={{ flexShrink: 0 }} />}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {h.video_a?.creator || "?"} vs {h.video_b?.creator || "?"}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        {/* user footer */}
+        <div style={{ borderTop: `1px solid ${C.border}`, padding: 10, display: "flex", alignItems: "center", gap: 9 }}>
+          <span style={{ width: 26, height: 26, borderRadius: "50%", background: "linear-gradient(135deg,#5e6ad2,#30d158)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 600, flexShrink: 0 }}>{initials}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.name || "Creator"}</div>
+            <div style={{ fontSize: 11, color: C.dimmer, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</div>
+          </div>
+          <button onClick={handleLogout} title="Log out"
+            style={{ background: "transparent", border: "none", color: C.dim, cursor: "pointer", padding: 6, display: "flex" }}>
+            <LogOut size={15} />
+          </button>
+        </div>
+      </aside>
+
+      {/* ════════ CENTER ════════ */}
+      <main className="dash-center" style={{ minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
+        <div aria-hidden style={{ position: "absolute", top: -160, left: "50%", transform: "translateX(-50%)", width: 700, height: 300, background: "radial-gradient(ellipse at center, rgba(94,106,210,0.10), transparent 70%)", filter: "blur(20px)", pointerEvents: "none", zIndex: 0 }} />
+
+        {/* breadcrumb header */}
+        <div style={{ height: 48, flexShrink: 0, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 8, padding: "0 18px", background: "rgba(8,9,10,0.6)", backdropFilter: "blur(12px)", zIndex: 2 }}>
+          {view === "history" ? <Inbox size={15} color={C.dim} /> : view === "insights" ? <Sparkles size={15} color={C.dim} /> : <BarChart3 size={15} color={C.dim} />}
+          <span style={{ fontSize: 13.5, fontWeight: 600 }}>
+            {view === "history" ? "History" : view === "insights" ? "Insights" : "Comparison"}
+          </span>
+          {view === "comparison" && hasData && (
+            <>
+              <ChevronRight size={13} color={C.dimmer} />
+              <span style={{ fontSize: 13, color: C.dim }}>{videoA?.creator} vs {videoB?.creator}</span>
+            </>
+          )}
+          <span style={{ marginLeft: "auto" }}>
+            {view === "comparison" && hasData && (
+              <span style={{ fontSize: 10.5, color: "#30d158", background: "rgba(48,209,88,0.1)", border: "1px solid rgba(48,209,88,0.2)", borderRadius: 7, padding: "3px 9px", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <CheckCircle size={11} /> Indexed in Qdrant
+              </span>
+            )}
+          </span>
+        </div>
+
+        {/* URL form — only in Comparison view */}
+        {view === "comparison" && (
+        <form onSubmit={handleAnalyze} style={{ flexShrink: 0, display: "flex", gap: 8, padding: "12px 18px", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", zIndex: 2 }}>
           <div style={{ flex: 1, position: "relative" }}>
-            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", pointerEvents: "none" }}>
-              <YoutubeInputIcon />
-            </span>
-            <input type="url" required disabled={isProcessing} placeholder="https://www.youtube.com/watch?v=…"
-              value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} style={inputBase} {...focusHandlers} />
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", display: "flex", pointerEvents: "none" }}><YoutubeInputIcon /></span>
+            <input type="url" required disabled={isProcessing} placeholder="YouTube URL…" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} style={inputBase} {...focusHandlers} />
           </div>
           <div style={{ flex: 1, position: "relative" }}>
-            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", pointerEvents: "none" }}>
-              <InstagramInputIcon />
-            </span>
-            <input type="url" required disabled={isProcessing} placeholder="https://www.instagram.com/reel/…"
-              value={instagramUrl} onChange={(e) => setInstagramUrl(e.target.value)} style={inputBase} {...focusHandlers} />
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", display: "flex", pointerEvents: "none" }}><InstagramInputIcon /></span>
+            <input type="url" required disabled={isProcessing} placeholder="Instagram Reel URL…" value={instagramUrl} onChange={(e) => setInstagramUrl(e.target.value)} style={inputBase} {...focusHandlers} />
           </div>
-          <motion.button type="submit" disabled={isProcessing}
-            whileHover={!isProcessing ? { background: "#0077ed", scale: 1.01 } : {}}
-            whileTap={!isProcessing ? { scale: 0.99 } : {}}
-            style={{
-              height: 42, padding: "0 20px", background: "#0071e3", border: "none", borderRadius: 12,
-              fontSize: 14, fontWeight: 500, color: "#fff", cursor: isProcessing ? "not-allowed" : "pointer",
-              opacity: isProcessing ? 0.7 : 1, display: "flex", alignItems: "center", gap: 8,
-              flexShrink: 0, whiteSpace: "nowrap", fontFamily: "inherit", boxShadow: "0 2px 14px rgba(0,113,227,0.3)",
-            }}>
-            {isProcessing ? <><Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> Analyzing…</> : "Analyze Videos"}
+          <motion.button type="submit" disabled={isProcessing} whileHover={!isProcessing ? { background: "#6b77e0" } : {}} whileTap={!isProcessing ? { scale: 0.98 } : {}}
+            style={{ height: 38, padding: "0 16px", background: C.blue, border: "none", borderRadius: 9, fontSize: 13.5, fontWeight: 500, color: "#fff", cursor: isProcessing ? "not-allowed" : "pointer", opacity: isProcessing ? 0.7 : 1, display: "flex", alignItems: "center", gap: 7, flexShrink: 0, whiteSpace: "nowrap", fontFamily: "inherit" }}>
+            {isProcessing ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Analyzing…</> : "Analyze"}
           </motion.button>
         </form>
-
+        )}
         <ProcessingBar isProcessing={isProcessing} />
         <AnimatePresence>
           {isProcessing && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
-              style={{ padding: "6px 22px 10px", overflow: "hidden" }}>
-              <motion.p key={processingStep} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }}
-                style={{ fontSize: 12, color: "#86868b", margin: 0 }}>{processingStep}</motion.p>
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} style={{ padding: "6px 18px", overflow: "hidden", flexShrink: 0 }}>
+              <motion.p key={processingStep} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} style={{ fontSize: 12, color: C.dim, margin: 0 }}>{processingStep}</motion.p>
             </motion.div>
           )}
         </AnimatePresence>
-      </div>
 
-      {/* ══ MAIN ══ */}
-      {!showDashboard ? (
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
-          style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 20px", textAlign: "center", position: "relative", zIndex: 1 }}>
-          <motion.div animate={{ scale: [1, 1.05, 1] }} transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-            style={{ width: 76, height: 76, background: "linear-gradient(135deg, rgba(0,113,227,0.14), rgba(48,209,88,0.14))", border: "1px solid rgba(0,113,227,0.22)", borderRadius: 24, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 26, color: "#0071e3", boxShadow: "0 8px 40px rgba(0,113,227,0.18)" }}>
-            <Eye size={30} />
-          </motion.div>
-          <h1 style={{ fontSize: 38, fontWeight: 600, color: "#f5f5f7", margin: "0 0 14px", letterSpacing: "-0.8px" }}>
-            Welcome back{user.name ? `, ${user.name.split(" ")[0]}` : ""}
-          </h1>
-          <p style={{ fontSize: 16, color: "#86868b", maxWidth: 480, lineHeight: 1.6, margin: 0 }}>
-            Paste a YouTube URL and an Instagram Reel URL above to compare their transcripts,
-            engagement metrics, and creator strategy using AI.
-          </p>
-          {restored && (
-            <button
-              onClick={() => { setYoutubeUrl(restored.videoA?.source_url || youtubeUrl); }}
-              style={{ marginTop: 22, fontSize: 12, color: "#0071e3", background: "transparent", border: "none", cursor: "pointer" }}
-            >
-              Last compared: {restored.videoA?.creator} vs {restored.videoB?.creator}
-            </button>
-          )}
-        </motion.div>
-      ) : (
-        <div className="dashboard-grid" style={{
-          flex: "1 1 0", minHeight: 0, display: "grid",
-          gridTemplateColumns: "minmax(560px, 640px) 1fr",
-          gridTemplateRows: "minmax(0, 1fr)", overflow: "hidden", position: "relative", zIndex: 1,
-        }}>
-          <div className="meta-col scroll-visible" style={{
-            minHeight: 0, height: "100%", overflowY: "scroll",
-            padding: "0 18px 24px", display: "flex", flexDirection: "column", gap: 16,
-            borderRight: "1px solid rgba(255,255,255,0.08)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 5, padding: "16px 0 12px", background: "linear-gradient(#000 70%, transparent)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                <BarChart3 size={15} color="#86868b" />
-                <h2 style={{ fontSize: 14, fontWeight: 600, color: "#f5f5f7", margin: 0, letterSpacing: "-0.2px" }}>Comparison</h2>
-              </div>
-              {hasData && (
-                <motion.span initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-                  style={{ fontSize: 10, color: "#30d158", background: "rgba(48,209,88,0.1)", border: "1px solid rgba(48,209,88,0.2)", borderRadius: 7, padding: "3px 9px", fontWeight: 500, display: "flex", alignItems: "center", gap: 5 }}>
-                  <CheckCircle size={11} /> Indexed
-                </motion.span>
+        {/* content area (scrolls) — view-aware */}
+        <div className="scroll-thin" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 18, position: "relative", zIndex: 1 }}>
+
+          {/* ── HISTORY VIEW ── */}
+          {view === "history" && (
+            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+              <h2 style={{ fontSize: 18, fontWeight: 600, margin: "4px 0 4px" }}>Your analyses</h2>
+              <p style={{ fontSize: 13, color: C.dim, margin: "0 0 18px" }}>Click any comparison to reopen it and chat against its data.</p>
+              {loadingHistory ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: C.dim, fontSize: 13 }}>
+                  <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Loading history…
+                </div>
+              ) : history.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.dimmer }}>No analyses yet. Run your first comparison.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {history.map((h) => {
+                    const isLoading = loadingId === h.id;
+                    const isActive = activeId === h.id;
+                    return (
+                      <button key={h.id} onClick={() => handleOpenAnalysis(h)} disabled={!!loadingId || isProcessing}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", textAlign: "left",
+                          background: isActive ? "rgba(94,106,210,0.1)" : C.panel,
+                          border: `1px solid ${isActive ? "rgba(94,106,210,0.3)" : C.border}`,
+                          borderRadius: 12, cursor: (loadingId || isProcessing) ? "wait" : "pointer",
+                          fontFamily: "inherit", color: C.text, opacity: (loadingId && !isLoading) ? 0.5 : 1,
+                        }}>
+                        <div style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(94,106,210,0.12)", border: "1px solid rgba(94,106,210,0.22)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {isLoading ? <Loader2 size={15} color={C.blue} style={{ animation: "spin 1s linear infinite" }} /> : <BarChart3 size={15} color={C.blue} />}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600 }}>
+                            {h.video_a?.creator || "?"} <span style={{ color: C.dimmer, fontWeight: 400 }}>vs</span> {h.video_b?.creator || "?"}
+                          </div>
+                          <div style={{ fontSize: 12, color: C.dim }}>
+                            A {h.video_a?.engagement_rate ?? 0}% · B {h.video_b?.engagement_rate ?? 0}% · {h.chunks_stored || 0} chunks
+                          </div>
+                        </div>
+                        <ChevronRight size={16} color={C.dimmer} />
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
+          )}
 
-            {isProcessing ? (
-              <><SkeletonVideoCard /><SkeletonVideoCard /></>
+          {/* ── INSIGHTS VIEW ── */}
+          {view === "insights" && (
+            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+              <h2 style={{ fontSize: 18, fontWeight: 600, margin: "4px 0 4px" }}>Insights</h2>
+              <p style={{ fontSize: 13, color: C.dim, margin: "0 0 18px" }}>A quick read on your current comparison.</p>
+              {!hasData ? (
+                <div style={{ fontSize: 13, color: C.dimmer }}>Open or run a comparison to see insights.</div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))", gap: 12 }}>
+                  {[
+                    { label: "Winner", value: winner ? (winner === "A" ? videoA.creator : videoB.creator) : "Tie", sub: "by engagement rate" },
+                    { label: "Video A engagement", value: `${videoA.engagement_rate}%`, sub: `${videoA.creator}` },
+                    { label: "Video B engagement", value: `${videoB.engagement_rate}%`, sub: `${videoB.creator}` },
+                    { label: "Combined reach", value: `${((videoA.views + videoB.views) / 1_000_000).toFixed(1)}M`, sub: "total views" },
+                  ].map((c) => (
+                    <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+                      <div className="text-label-uppercase" style={{ fontSize: 10, color: C.dimmer, marginBottom: 8 }}>{c.label}</div>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: "-0.4px" }}>{c.value}</div>
+                      <div style={{ fontSize: 12, color: C.dim, marginTop: 4 }}>{c.sub}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── COMPARISON VIEW ── */}
+          {view === "comparison" && (
+            !showWork && !hasData ? (
+              <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "40px 20px" }}>
+                <motion.div animate={{ scale: [1, 1.05, 1] }} transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                  style={{ marginBottom: 22 }}>
+                  <Logo size={64} />
+                </motion.div>
+                <h1 style={{ fontSize: 28, fontWeight: 600, margin: "0 0 12px", letterSpacing: "-0.6px" }}>
+                  Welcome back{user.name ? `, ${user.name.split(" ")[0]}` : ""}
+                </h1>
+                <p style={{ fontSize: 15, color: C.dim, maxWidth: 420, lineHeight: 1.6, margin: 0 }}>
+                  Paste a YouTube URL and an Instagram Reel URL above to compare metrics, transcripts, and creator strategy.
+                </p>
+                {restored && (
+                  <div style={{ marginTop: 20, fontSize: 12, color: C.dimmer }}>
+                    Last compared: <span style={{ color: C.dim }}>{restored.videoA?.creator} vs {restored.videoB?.creator}</span>
+                  </div>
+                )}
+              </div>
             ) : (
-              videosLoaded && (
-                <>
-                  {videoA && <VideoCard key="a" video={videoA} animationDelay={0} isWinner={winner === "A"} />}
-                  {videoB && <VideoCard key="b" video={videoB} animationDelay={100} isWinner={winner === "B"} />}
-                </>
-              )
-            )}
-          </div>
-
-          <div className="chat-col" style={{ height: "100%", overflow: "hidden" }}>
-            <ChatInterface ref={chatRef} />
-          </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, maxWidth: 1000, margin: "0 auto" }} className="cards-grid">
+                {isProcessing ? (
+                  <><SkeletonVideoCard /><SkeletonVideoCard /></>
+                ) : (
+                  <>
+                    {videoA && <VideoCard key="a" video={videoA} animationDelay={0} isWinner={winner === "A"} />}
+                    {videoB && <VideoCard key="b" video={videoB} animationDelay={100} isWinner={winner === "B"} />}
+                  </>
+                )}
+              </div>
+            )
+          )}
         </div>
-      )}
+      </main>
+
+      {/* ════════ RIGHT CHAT PANEL ════════ */}
+      <aside className="dash-chat" style={{ borderLeft: `1px solid ${C.border}`, minHeight: 0, overflow: "hidden" }}>
+        <ChatInterface ref={chatRef} />
+      </aside>
 
       <style>{`
-        .scroll-visible::-webkit-scrollbar { width: 10px; }
-        .scroll-visible::-webkit-scrollbar-thumb { background-color: #3a3a3a; border-radius: 9999px; border: 2px solid #000; }
-        .scroll-visible::-webkit-scrollbar-thumb:hover { background-color: #555; }
-        .scroll-visible > * { flex-shrink: 0; }
-        @media (max-width: 1023px) {
-          .app-shell { height: auto !important; min-height: 100vh; overflow: visible !important; }
-          .dashboard-grid { display: block !important; overflow: visible !important; }
-          .meta-col { height: auto !important; overflow: visible !important; border-right: none !important; border-bottom: 1px solid rgba(255,255,255,0.08); }
-          .chat-col { height: 600px !important; }
-        }
+        .scroll-thin::-webkit-scrollbar { width: 8px; }
+        .scroll-thin::-webkit-scrollbar-thumb { background-color: #2a2b2e; border-radius: 9999px; }
+        .scroll-thin::-webkit-scrollbar-thumb:hover { background-color: #3a3b3e; }
         @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+        @media (max-width: 1180px) {
+          .dash-shell { grid-template-columns: 200px 1fr 340px !important; }
+        }
+        @media (max-width: 980px) {
+          .dash-shell { display: flex !important; flex-direction: column !important; height: auto !important; min-height: 100vh; overflow: visible !important; }
+          .dash-sidebar { display: none !important; }
+          .dash-center { min-height: 70vh; }
+          .dash-chat { height: 560px; border-left: none !important; border-top: 1px solid rgba(255,255,255,0.08); }
+          .cards-grid { grid-template-columns: 1fr !important; }
+        }
       `}</style>
     </div>
   );

@@ -3,23 +3,29 @@
 import React from "react";
 import { motion } from "framer-motion";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw, Clock } from "lucide-react";
 
 /* ─── Citation pill with Radix tooltip ─── */
 function CitationPill({ cit, index }) {
-  const label = `${cit.video_id}:${cit.chunk_index ?? index}`;
-  const preview = cit.content
-    ? cit.content.slice(0, 150) + (cit.content.length > 150 ? "…" : "")
-    : null;
   const isA = cit.video_id === "A";
+  const isTranscript = cit.content_type === "transcript" && cit.timestamp && cit.timestamp !== "00:00";
+  // Pill label: timestamp deep-link for transcript chunks, otherwise chunk ref.
+  const label = isTranscript
+    ? `${cit.video_id} · ${cit.timestamp}`
+    : `${cit.video_id}:${cit.chunk_index ?? index}`;
+  const href = cit.deep_link || cit.url || "";
+  const preview = cit.content
+    ? cit.content.slice(0, 160) + (cit.content.length > 160 ? "…" : "")
+    : null;
+  const accent = isA ? "#0071e3" : "#30d158";
 
   return (
     <Tooltip.Provider delayDuration={250}>
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
           <a
-            href={cit.url || "#"}
-            target={cit.url ? "_blank" : undefined}
+            href={href || "#"}
+            target={href ? "_blank" : undefined}
             rel="noopener noreferrer"
             style={{
               display: "inline-flex",
@@ -30,18 +36,19 @@ function CitationPill({ cit, index }) {
               border: `1px solid ${isA ? "rgba(0,113,227,0.3)" : "rgba(48,209,88,0.3)"}`,
               borderRadius: 6,
               fontSize: 11,
-              color: isA ? "#0071e3" : "#30d158",
+              color: accent,
               fontWeight: 500,
               textDecoration: "none",
-              cursor: "pointer",
+              cursor: href ? "pointer" : "default",
               transition: "background 150ms ease",
               whiteSpace: "nowrap",
             }}
             onMouseEnter={(e) => { e.currentTarget.style.background = "#222222"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "#1a1a1a"; }}
           >
+            {isTranscript ? <Clock size={10} style={{ opacity: 0.8 }} /> : null}
             [{label}]
-            {cit.url && <ExternalLink size={9} style={{ opacity: 0.6 }} />}
+            {href && <ExternalLink size={9} style={{ opacity: 0.6 }} />}
           </a>
         </Tooltip.Trigger>
 
@@ -65,11 +72,16 @@ function CitationPill({ cit, index }) {
                 zIndex: 9999,
               }}
             >
-              <div style={{ fontSize: 10, fontWeight: 600, color: isA ? "#0071e3" : "#30d158", marginBottom: 5, letterSpacing: "0.8px", textTransform: "uppercase" }}>
-                Video {cit.video_id} · Chunk {cit.chunk_index ?? index}
-                {cit.timestamp && ` · ${cit.timestamp}`}
+              <div style={{ fontSize: 10, fontWeight: 600, color: accent, marginBottom: 5, letterSpacing: "0.8px", textTransform: "uppercase" }}>
+                Video {cit.video_id}
+                {isTranscript ? ` · ${cit.timestamp}` : ` · Chunk ${cit.chunk_index ?? index}`}
               </div>
               {preview}
+              {isTranscript && href && (
+                <div style={{ marginTop: 8, fontSize: 10.5, color: accent, display: "flex", alignItems: "center", gap: 4 }}>
+                  <ExternalLink size={10} /> Jump to {cit.timestamp} in the video
+                </div>
+              )}
               <Tooltip.Arrow style={{ fill: "#1a1a1a" }} />
             </Tooltip.Content>
           </Tooltip.Portal>
@@ -114,14 +126,59 @@ function TypingDots() {
 }
 
 /* ─── Custom Markdown Helpers ─── */
-function InlineRenderer({ text }) {
+
+/** Resolve an inline [Video X, ...] citation token to a deep link (if any). */
+function findCitationLink(citations, videoId, ref) {
+  if (!citations || !citations.length) return null;
+  const vid = videoId.toUpperCase();
+  const r = (ref || "").trim().toLowerCase();
+  // Timestamp ref like "1:15" → match a transcript chunk with that timestamp.
+  const byTs = citations.find(
+    (c) => c.video_id === vid && c.content_type === "transcript" && c.timestamp === ref.trim()
+  );
+  if (byTs) return byTs.deep_link || byTs.url || null;
+  // "metadata" / "overview" → any chunk for that video with a usable URL.
+  if (r === "metadata" || r === "overview") {
+    const any = citations.find((c) => c.video_id === vid && (c.url || c.deep_link));
+    return any ? (any.url || any.deep_link) : null;
+  }
+  // fallback: any chunk for that video
+  const any = citations.find((c) => c.video_id === vid);
+  return any ? (any.deep_link || any.url || null) : null;
+}
+
+function InlineRenderer({ text, citations }) {
   if (!text) return null;
-  const regex = /(\*\*.*?\*\*|\*.*?\*|`.*?`)/g;
+  // Split on bold/italic/code AND [Video X, ...] citation tokens.
+  const regex = /(\*\*.*?\*\*|\*.*?\*|`.*?`|\[Video [AB],[^\]]*\])/g;
   const parts = text.split(regex);
 
   return (
     <>
       {parts.map((part, index) => {
+        const cite = part.match(/^\[Video ([AB]),\s*([^\]]*)\]$/);
+        if (cite) {
+          const [, vid, ref] = cite;
+          const link = findCitationLink(citations, vid, ref);
+          const accent = vid === "A" ? "#0071e3" : "#30d158";
+          const isTs = /^\d{1,2}:\d{2}$/.test(ref.trim());
+          const inner = (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: "0.82em", fontWeight: 600, color: accent, verticalAlign: "baseline" }}>
+              {isTs ? <Clock size={9} style={{ opacity: 0.85 }} /> : null}
+              [{vid}{ref ? `, ${ref.trim()}` : ""}]
+            </span>
+          );
+          if (link) {
+            return (
+              <a key={index} href={link} target="_blank" rel="noopener noreferrer"
+                style={{ textDecoration: "none", cursor: "pointer" }}
+                title={isTs ? `Jump to ${ref.trim()} in the video` : "Open source"}>
+                {inner}
+              </a>
+            );
+          }
+          return <span key={index}>{inner}</span>;
+        }
         if (part.startsWith("**") && part.endsWith("**")) {
           return <strong key={index} style={{ fontWeight: 600, color: "#ffffff" }}>{part.slice(2, -2)}</strong>;
         }
@@ -151,7 +208,7 @@ function InlineRenderer({ text }) {
   );
 }
 
-function MarkdownRenderer({ text, showCursor }) {
+function MarkdownRenderer({ text, showCursor, citations }) {
   if (!text) return null;
   const lines = text.split("\n");
   const blocks = [];
@@ -225,21 +282,21 @@ function MarkdownRenderer({ text, showCursor }) {
           case "h1":
             return (
               <h1 key={index} style={{ fontSize: "18px", fontWeight: 600, color: "#f5f5f7", margin: "12px 0 6px", lineHeight: 1.3 }}>
-                <InlineRenderer text={block.text} />
+                <InlineRenderer text={block.text} citations={citations} />
                 {blockShowCursor && <BlinkCursor />}
               </h1>
             );
           case "h2":
             return (
               <h2 key={index} style={{ fontSize: "16px", fontWeight: 600, color: "#f5f5f7", margin: "10px 0 4px", lineHeight: 1.3 }}>
-                <InlineRenderer text={block.text} />
+                <InlineRenderer text={block.text} citations={citations} />
                 {blockShowCursor && <BlinkCursor />}
               </h2>
             );
           case "h3":
             return (
               <h3 key={index} style={{ fontSize: "14px", fontWeight: 600, color: "#f5f5f7", margin: "8px 0 2px", lineHeight: 1.3 }}>
-                <InlineRenderer text={block.text} />
+                <InlineRenderer text={block.text} citations={citations} />
                 {blockShowCursor && <BlinkCursor />}
               </h3>
             );
@@ -250,7 +307,7 @@ function MarkdownRenderer({ text, showCursor }) {
                   const isLastItem = itemIdx === block.items.length - 1;
                   return (
                     <li key={itemIdx} style={{ marginBottom: "4px", color: "#f5f5f7" }}>
-                      <InlineRenderer text={item} />
+                      <InlineRenderer text={item} citations={citations} />
                       {blockShowCursor && isLastItem && <BlinkCursor />}
                     </li>
                   );
@@ -264,7 +321,7 @@ function MarkdownRenderer({ text, showCursor }) {
                   const isLastItem = itemIdx === block.items.length - 1;
                   return (
                     <li key={itemIdx} style={{ marginBottom: "4px", color: "#f5f5f7" }}>
-                      <InlineRenderer text={item} />
+                      <InlineRenderer text={item} citations={citations} />
                       {blockShowCursor && isLastItem && <BlinkCursor />}
                     </li>
                   );
@@ -275,7 +332,7 @@ function MarkdownRenderer({ text, showCursor }) {
           default:
             return (
               <p key={index} style={{ margin: 0, lineHeight: 1.6 }}>
-                <InlineRenderer text={block.text} />
+                <InlineRenderer text={block.text} citations={citations} />
                 {blockShowCursor && <BlinkCursor />}
               </p>
             );
@@ -326,7 +383,7 @@ export default function MessageBubble({ message, onRetry }) {
         {streaming && !message.text && <TypingDots />}
 
         {/* Message text rendered as beautiful markdown */}
-        <MarkdownRenderer text={message.text} showCursor={streaming && !!message.text} />
+        <MarkdownRenderer text={message.text} showCursor={streaming && !!message.text} citations={message.citations} />
       </div>
 
       {/* Retry button on error */}

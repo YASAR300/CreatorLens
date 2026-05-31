@@ -12,6 +12,12 @@ export function useStreamingChat() {
   const [isStreaming, setIsStreaming] = useState(false);
   const streamRef = useRef(null); // active { cancel } handle
   const lastQuestionRef = useRef(""); // for Retry
+  const analysisIdRef = useRef("default"); // active analysis to chat against
+
+  // Let the parent point chat at a specific saved analysis.
+  const setAnalysisId = useCallback((id) => {
+    analysisIdRef.current = id || "default";
+  }, []);
 
   const patch = useCallback((id, updater) => {
     setMessages((prev) =>
@@ -40,6 +46,7 @@ export function useStreamingChat() {
       setMessages((prev) => [...prev, userMsg, botMsg]);
 
       streamRef.current = streamChatMessage(query, {
+        analysisId: analysisIdRef.current,
         onToken: (token) =>
           patch(botId, (m) => ({ text: m.text + token })),
         onSources: (sources) =>
@@ -107,5 +114,6 @@ export function useStreamingChat() {
     stopStreaming,
     retryLast,
     clearChat,
+    setAnalysisId,
   };
 }

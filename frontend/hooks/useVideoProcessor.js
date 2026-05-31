@@ -15,7 +15,7 @@ export const PROCESSING_STEPS = [
   { delay: 8000, message: "Downloading reel audio…" },
   { delay: 12000, message: "Transcribing audio with Groq Whisper…" },
   { delay: 45000, message: "Generating semantic embeddings…" },
-  { delay: 60000, message: "Indexing to ChromaDB…" },
+  { delay: 60000, message: "Indexing to Qdrant…" },
 ];
 
 /**
@@ -74,7 +74,7 @@ export function useVideoProcessor() {
         setVideoB(data.video_b);
         const total =
           (data.video_a?.chunks_stored || 0) + (data.video_b?.chunks_stored || 0);
-        toast.success(`Done! ${total} chunks indexed in ChromaDB.`, { id: tid });
+        toast.success(`Done! ${total} chunks indexed in Qdrant.`, { id: tid });
         onSuccess?.(data);
       } catch (err) {
         const msg = err?.message || "Processing failed. Check backend logs.";
@@ -100,6 +100,17 @@ export function useVideoProcessor() {
     setProcessingStep("");
   }, [clearTimers]);
 
+  // Load a saved analysis's cards directly (bypasses scraping).
+  const loadVideos = useCallback((va, vb) => {
+    clearTimers();
+    setError(null);
+    setProcessingStep("");
+    setIsProcessing(false);
+    setVideosLoaded(false);
+    setVideoA(va || null);
+    setVideoB(vb || null);
+  }, [clearTimers]);
+
   return {
     youtubeUrl,
     setYoutubeUrl,
@@ -113,5 +124,6 @@ export function useVideoProcessor() {
     videosLoaded,
     analyze,
     reset,
+    loadVideos,
   };
 }

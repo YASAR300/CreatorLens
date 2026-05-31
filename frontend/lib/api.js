@@ -39,12 +39,27 @@ export async function processVideos(youtubeUrl, instagramUrl) {
 /**
  * POST /api/chat/reset — wipe the conversation memory window on the backend.
  */
-export async function resetChat() {
-  const res = await fetch(`${API_BASE}/api/chat/reset`, {
+export async function resetChat(analysisId = "default") {
+  const res = await fetch(
+    `${API_BASE}/api/chat/reset?analysis_id=${encodeURIComponent(analysisId)}`,
+    { method: "POST", credentials: "include" }
+  );
+  if (!res.ok) throw new Error(`Reset failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * POST /api/videos/load/{id} — reopen a saved analysis (re-hydrates RAG state).
+ */
+export async function loadAnalysis(analysisId) {
+  const res = await fetch(`${API_BASE}/api/videos/load/${encodeURIComponent(analysisId)}`, {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`Reset failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Server error ${res.status}`);
+  }
   return res.json();
 }
 
@@ -106,19 +121,22 @@ export async function fetchHistory() {
  *
  * @returns {{ cancel: () => void }} a handle whose cancel() aborts the stream.
  */
-export function streamChatMessage(message, { onToken, onSources, onDone, onError }) {
+export function streamChatMessage(message, { onToken, onSources, onDone, onError, analysisId = "default" }) {
   const controller = new AbortController();
   let cancelled = false;
 
   (async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ message }),
-        signal: controller.signal,
-      });
+      const res = await fetch(
+        `${API_BASE}/api/chat/stream?analysis_id=${encodeURIComponent(analysisId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ message }),
+          signal: controller.signal,
+        }
+      );
 
       if (!res.ok || !res.body) {
         throw new Error(`HTTP ${res.status}`);

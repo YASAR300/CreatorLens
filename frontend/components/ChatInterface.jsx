@@ -21,7 +21,7 @@ const SUGGESTIONS = [
  * analysis can wipe the conversation.
  */
 function ChatInterface(_props, ref) {
-  const { messages, isStreaming, sendMessage, stopStreaming, retryLast, clearChat } =
+  const { messages, isStreaming, sendMessage, stopStreaming, retryLast, clearChat, setAnalysisId } =
     useStreamingChat();
   const [input, setInput] = useState("");
 
@@ -31,7 +31,7 @@ function ChatInterface(_props, ref) {
   // Tracks whether the user is pinned near the bottom (controls auto-scroll).
   const stickToBottom = useRef(true);
 
-  useImperativeHandle(ref, () => ({ clearChat }), [clearChat]);
+  useImperativeHandle(ref, () => ({ clearChat, setAnalysisId }), [clearChat, setAnalysisId]);
 
   /* Smart auto-scroll: only follow new content if the user is near the bottom.
      If they scrolled up to read history, don't yank them back down. */
