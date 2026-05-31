@@ -48,81 +48,127 @@ def parse_first_timestamp(text: str) -> str:
         return f"{int(match.group(1)):02d}:{match.group(2)}"
     return "00:00"
 
+def _build_content_document(video_data: dict) -> str:
+    """
+    Build the richest possible text blob describing a video, used as a
+    guaranteed-present RAG document even when the spoken transcript is missing.
+
+    Combines title, creator, caption/description and (when available) the
+    transcript. For photo posts / transcription failures this caption-derived
+    text is what lets the bot answer "what is this video about?".
+    """
+    title = (video_data.get("title") or "").strip()
+    creator = (video_data.get("creator") or "").strip()
+    # Instagram uses "caption", YouTube uses "description"
+    description = (video_data.get("caption") or video_data.get("description") or "").strip()
+    platform = video_data.get("platform", "")
+
+    header_parts = []
+    if title:
+        header_parts.append(f"Title: {title}")
+    if creator:
+        header_parts.append(f"Creator: {creator} ({platform})")
+    if description:
+        header_parts.append(f"Description / Caption: {description}")
+    return "\n".join(header_parts).strip()
+
+
 def process_and_store(video_data: dict) -> int:
     """
-    Split the transcript into semantic chunks (500 chars, 50 overlap), 
-    tag chunks with denormalized metadata, assign unique IDs, and persist in ChromaDB.
-    
-    If transcript is unavailable, creates a single synthetic fallback document.
+    Split content into semantic chunks (500 chars, 50 overlap), tag chunks with
+    denormalized metadata, assign unique IDs, and persist in ChromaDB.
+
+    Content priority for embedding:
+      1. A "context" chunk built from title + creator + caption/description —
+         ALWAYS stored, so the bot can describe the video even with no transcript.
+      2. The spoken transcript split into timestamped chunks (when available).
+
+    This guarantees Video B is never reduced to the unhelpful
+    "No transcript available" placeholder.
     """
     video_id = video_data.get("video_id", "A")
     platform = video_data.get("platform", "youtube")
     creator = video_data.get("creator", "Unknown")
-    
-    logger.info(f"Processing and storing transcript for Video {video_id} ({platform}) by {creator}")
-    
-    transcript = video_data.get("transcript", "")
-    
-    # Check if transcript is missing or explicitly unavailable
-    if transcript == "Transcript not available for this video." or not transcript.strip():
-        logger.warning(f"No transcript available for Video {video_id}. Creating metadata-only synthetic chunk.")
-        chunk_texts = ["No transcript available. Metadata only."]
-        
-        metadata = {
-            "video_id": video_id,
-            "platform": platform,
-            "creator": creator,
-            "chunk_index": 0,
-            "views": int(video_data.get("views", 0)),
-            "likes": int(video_data.get("likes", 0)),
-            "comments": int(video_data.get("comments", 0)),
-            "engagement_rate": float(video_data.get("engagement_rate", 0.0)),
-            "upload_date": str(video_data.get("upload_date", "")),
-            "source_url": video_data.get("url", ""),
-            "timestamp": "00:00",
-            "tags": ", ".join(video_data.get("tags", [])) if isinstance(video_data.get("tags"), list) else str(video_data.get("tags", ""))
-        }
-        chunk_metadatas = [metadata]
-        chunk_ids = [f"{video_id}_0"]
-    else:
-        # Split normal transcript
-        chunks = text_splitter.split_text(transcript)
-        chunk_texts = []
-        chunk_metadatas = []
-        chunk_ids = []
-        
-        for i, chunk in enumerate(chunks):
+
+    logger.info(f"Processing and storing content for Video {video_id} ({platform}) by {creator}")
+
+    transcript = video_data.get("transcript", "") or ""
+    transcript_missing = (
+        transcript.strip() == "" or transcript.startswith("Transcript not available")
+    )
+
+    base_meta = {
+        "video_id": video_id,
+        "platform": platform,
+        "creator": creator,
+        "views": int(video_data.get("views", 0)),
+        "likes": int(video_data.get("likes", 0)),
+        "comments": int(video_data.get("comments", 0)),
+        "engagement_rate": float(video_data.get("engagement_rate", 0.0)),
+        "upload_date": str(video_data.get("upload_date", "")),
+        "source_url": video_data.get("url", ""),
+        "tags": ", ".join(video_data.get("tags", [])) if isinstance(video_data.get("tags"), list) else str(video_data.get("tags", "")),
+    }
+
+    chunk_texts: List[str] = []
+    chunk_metadatas: List[dict] = []
+    chunk_ids: List[str] = []
+    idx = 0
+
+    # 1. Always store a context/overview chunk from title + caption/description.
+    context_doc = _build_content_document(video_data)
+    if context_doc:
+        meta = dict(base_meta)
+        meta["chunk_index"] = idx
+        meta["timestamp"] = "00:00"
+        meta["content_type"] = "overview"
+        chunk_texts.append(context_doc)
+        chunk_metadatas.append(meta)
+        chunk_ids.append(f"{video_id}_{idx}")
+        idx += 1
+
+    # 2. Store transcript chunks when a real transcript exists.
+    if not transcript_missing:
+        for chunk in text_splitter.split_text(transcript):
+            meta = dict(base_meta)
+            meta["chunk_index"] = idx
+            meta["timestamp"] = parse_first_timestamp(chunk)
+            meta["content_type"] = "transcript"
             chunk_texts.append(chunk)
-            metadata = {
-                "video_id": video_id,
-                "platform": platform,
-                "creator": creator,
-                "chunk_index": i,
-                "views": int(video_data.get("views", 0)),
-                "likes": int(video_data.get("likes", 0)),
-                "comments": int(video_data.get("comments", 0)),
-                "engagement_rate": float(video_data.get("engagement_rate", 0.0)),
-                "upload_date": str(video_data.get("upload_date", "")),
-                "source_url": video_data.get("url", ""),
-                "timestamp": parse_first_timestamp(chunk),
-                "tags": ", ".join(video_data.get("tags", [])) if isinstance(video_data.get("tags"), list) else str(video_data.get("tags", ""))
-            }
-            chunk_metadatas.append(metadata)
-            chunk_ids.append(f"{video_id}_{i}")
-            
+            chunk_metadatas.append(meta)
+            chunk_ids.append(f"{video_id}_{idx}")
+            idx += 1
+    else:
+        logger.warning(
+            f"No spoken transcript for Video {video_id}; relying on the "
+            f"caption/metadata overview chunk for retrieval."
+        )
+
+    # 3. Absolute fallback: if somehow there's no content at all, store a stub
+    #    so retrieval filters still return a document for this video_id.
+    if not chunk_texts:
+        meta = dict(base_meta)
+        meta["chunk_index"] = 0
+        meta["timestamp"] = "00:00"
+        meta["content_type"] = "overview"
+        chunk_texts.append(
+            f"Video {video_id} by {creator} on {platform}. "
+            f"No transcript or caption was available; only engagement metrics are known."
+        )
+        chunk_metadatas.append(meta)
+        chunk_ids.append(f"{video_id}_0")
+
     logger.info(f"Created {len(chunk_texts)} chunks for Video {video_id}. Storing in ChromaDB...")
-    
-    # Batch add chunks to ChromaDB
+
     chroma_db.add_texts(
         texts=chunk_texts,
         metadatas=chunk_metadatas,
         ids=chunk_ids
     )
-    
-    # Explicitly call persist (defensive coding to guarantee persistence)
+
     chroma_db.persist()
     logger.info(f"Successfully persisted {len(chunk_texts)} chunks to ChromaDB.")
-    
+
     return len(chunk_texts)
 
 def clear_collection():
