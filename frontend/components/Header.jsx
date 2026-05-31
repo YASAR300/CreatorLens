@@ -1,5 +1,5 @@
 import React from 'react';
-import { Eye, ShieldAlert, Sparkles, Terminal } from 'lucide-react';
+import { Eye, Terminal } from 'lucide-react';
 
 export default function Header({ onReset, hasData, isResetting }) {
   return (

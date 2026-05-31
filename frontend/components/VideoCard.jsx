@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useState } from "react";
-import { motion } from "framer-motion";
-import { ChevronDown, ChevronUp, Clock } from "lucide-react";
-import clsx from "clsx";
+import { motion, AnimatePresence } from "framer-motion";
+import { ChevronDown, ChevronUp, Clock, TrendingUp } from "lucide-react";
+import { API_BASE } from "../lib/api";
 
 /* ─── Platform SVG icons ─── */
 const YoutubeIcon = ({ size = 14 }) => (
@@ -23,11 +23,11 @@ const InstagramIcon = ({ size = 14 }) => (
 /* ─── Stat column ─── */
 function StatColumn({ label, value }) {
   return (
-    <div style={{ background: "#0a0a0a", padding: "14px 16px" }}>
-      <div style={{ fontSize: "11px", fontWeight: 500, color: "#86868b", letterSpacing: "0.8px", textTransform: "uppercase", marginBottom: "4px" }}>
+    <div style={{ background: "#0a0a0a", padding: "12px 14px" }}>
+      <div className="text-label-uppercase" style={{ fontSize: 10, color: "#86868b", marginBottom: 3 }}>
         {label}
       </div>
-      <div style={{ fontSize: "16px", fontWeight: 500, color: "#f5f5f7" }}>{value}</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: "#f5f5f7", letterSpacing: "-0.2px" }}>{value}</div>
     </div>
   );
 }
@@ -41,7 +41,7 @@ function fmt(n) {
 }
 
 /* ─── VideoCard ─── */
-export default function VideoCard({ video, animationDelay = 0 }) {
+export default function VideoCard({ video, animationDelay = 0, isWinner = false }) {
   const [thumbError, setThumbError] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
@@ -49,30 +49,35 @@ export default function VideoCard({ video, animationDelay = 0 }) {
 
   const isYoutube = video.platform === "youtube";
   const tags = video.hashtags || [];
-  const visibleTags = showAll ? tags : tags.slice(0, 8);
-  const hidden = tags.length - 8;
+  const VISIBLE = 10;
+  const hidden = tags.length - VISIBLE;
   const rawThumb = video.thumbnail_url || video.thumbnail || null;
   const thumb = (video.platform === "instagram" && rawThumb)
-    ? `http://localhost:8000/api/videos/thumbnail-proxy?url=${encodeURIComponent(rawThumb)}`
+    ? `${API_BASE}/api/videos/thumbnail-proxy?url=${encodeURIComponent(rawThumb)}`
     : rawThumb;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, ease: "easeOut", delay: animationDelay / 1000 }}
-      whileHover={{ y: -2, boxShadow: "0 8px 40px rgba(0,0,0,0.7)" }}
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1], delay: animationDelay / 1000 }}
+      whileHover={{ y: -2, boxShadow: "0 10px 44px rgba(0,0,0,0.6)" }}
       style={{
-        background: "#0a0a0a",
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: "20px",
+        background: "#0c0c0c",
+        // Winner gets a subtle green-tinted border to answer "which performed better?"
+        border: isWinner
+          ? "1px solid rgba(48,209,88,0.28)"
+          : "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 18,
         overflow: "hidden",
-        boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+        boxShadow: isWinner
+          ? "0 4px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(48,209,88,0.06)"
+          : "0 4px 24px rgba(0,0,0,0.5)",
         transition: "box-shadow 200ms ease",
       }}
     >
       {/* ── Thumbnail ── */}
-      <div style={{ position: "relative", width: "100%", aspectRatio: "16/9" }}>
+      <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#000" }}>
         {thumb && !thumbError ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -94,35 +99,38 @@ export default function VideoCard({ video, animationDelay = 0 }) {
         )}
 
         {/* Platform badge */}
-        <div style={{
-          position: "absolute", top: 12, left: 12,
+        <div className="text-label-uppercase" style={{
+          position: "absolute", top: 10, left: 10,
           display: "flex", alignItems: "center", gap: 5,
-          padding: "4px 10px", borderRadius: 20,
-          fontSize: 11, fontWeight: 500, color: "#fff",
+          padding: "4px 9px", borderRadius: 8,
+          fontSize: 10, fontWeight: 600, color: "#fff", letterSpacing: "0.4px",
           backdropFilter: "blur(12px)",
           background: isYoutube
             ? "rgba(255,0,0,0.85)"
-            : "linear-gradient(135deg,rgba(131,58,180,0.9),rgba(253,29,29,0.9),rgba(252,176,69,0.9))",
+            : "linear-gradient(135deg,rgba(131,58,180,0.92),rgba(253,29,29,0.92),rgba(252,176,69,0.92))",
         }}>
-          {isYoutube ? <YoutubeIcon /> : <InstagramIcon />}
+          {isYoutube ? <YoutubeIcon size={12} /> : <InstagramIcon size={12} />}
           {isYoutube ? "Video A · YouTube" : "Video B · Instagram"}
         </div>
       </div>
 
       {/* ── Body ── */}
-      <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
 
         {/* Creator + meta */}
         <div>
-          <h3 style={{ fontSize: 18, fontWeight: 500, color: "#f5f5f7", margin: "0 0 3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <h3 style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7", margin: "0 0 3px", letterSpacing: "-0.2px", wordBreak: "break-word" }}>
             {video.creator || "Unknown Creator"}
           </h3>
           {video.title && (
-            <p style={{ fontSize: 13, color: "#86868b", margin: "0 0 2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <p style={{
+              fontSize: 13, color: "#a1a1a6", margin: "0 0 6px", lineHeight: 1.45,
+              wordBreak: "break-word",
+            }}>
               {video.title}
             </p>
           )}
-          <p style={{ fontSize: 13, color: "#86868b", margin: 0, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+          <p style={{ fontSize: 12.5, color: "#86868b", margin: 0, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
             <span>{video.upload_date || "—"}</span>
             {video.upload_time ? <span style={{ color: "#48484a" }}>·</span> : null}
             {video.upload_time ? <span>{video.upload_time}</span> : null}
@@ -130,8 +138,8 @@ export default function VideoCard({ video, animationDelay = 0 }) {
             {video.duration && video.duration !== "0:00" ? (
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 3,
-                background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: 8, padding: "1px 7px", fontSize: 12,
+                background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 7, padding: "1px 7px", fontSize: 11.5,
               }}>
                 <Clock size={11} /> {video.duration}
               </span>
@@ -151,62 +159,100 @@ export default function VideoCard({ video, animationDelay = 0 }) {
         </div>
 
         {/* Engagement rate */}
-        <div>
-          <div className="engagement-gradient" style={{ fontSize: 32, fontWeight: 600, lineHeight: 1.1 }}>
+        <div style={{
+          position: "relative",
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 14, padding: "14px 16px",
+        }}>
+          <div className="engagement-gradient" style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.05, letterSpacing: "-0.5px" }}>
             {video.engagement_rate != null ? `${video.engagement_rate}%` : "—"}
           </div>
-          <div style={{ fontSize: 11, color: "#86868b", letterSpacing: "0.8px", textTransform: "uppercase", marginTop: 4 }}>
+          <div className="text-label-uppercase" style={{ fontSize: 10.5, color: "#86868b", marginTop: 4 }}>
             Engagement Rate
           </div>
+          {isWinner && (
+            <motion.div
+              className="scale-in"
+              style={{
+                position: "absolute", top: 14, right: 14,
+                display: "inline-flex", alignItems: "center", gap: 4,
+                fontSize: 10, fontWeight: 600, color: "#30d158",
+                background: "rgba(48,209,88,0.12)",
+                border: "1px solid rgba(48,209,88,0.25)",
+                borderRadius: 8, padding: "3px 8px",
+              }}
+            >
+              <TrendingUp size={11} /> Higher
+            </motion.div>
+          )}
         </div>
 
         {/* Hashtags */}
         {tags.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {visibleTags.map((tag, i) => (
-              <motion.span
-                key={i}
-                whileHover={{ borderColor: "rgba(255,255,255,0.22)", color: "#cccccc" }}
-                style={{
-                  background: "#1a1a1a",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 12, padding: "5px 10px",
-                  fontSize: 11, color: "#86868b", cursor: "default",
-                }}
-              >
-                #{tag}
-              </motion.span>
-            ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {tags.slice(0, VISIBLE).map((tag, i) => (
+                <motion.span
+                  key={i}
+                  whileHover={{ borderColor: "rgba(255,255,255,0.22)", color: "#cccccc" }}
+                  style={{
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8, padding: "3px 8px",
+                    fontSize: 10.5, color: "#86868b", cursor: "default",
+                  }}
+                >
+                  #{tag}
+                </motion.span>
+              ))}
+            </div>
 
-            {!showAll && hidden > 0 && (
+            {/* Overflow tags animate open/closed with a smooth height transition
+                (height:auto is impossible with CSS alone — Framer handles it). */}
+            <AnimatePresence initial={false}>
+              {showAll && hidden > 0 && (
+                <motion.div
+                  key="overflow"
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                  style={{ overflow: "hidden" }}
+                >
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {tags.slice(VISIBLE).map((tag, i) => (
+                      <span
+                        key={i}
+                        style={{
+                          background: "rgba(255,255,255,0.04)",
+                          border: "1px solid rgba(255,255,255,0.08)",
+                          borderRadius: 8, padding: "3px 8px",
+                          fontSize: 10.5, color: "#86868b",
+                        }}
+                      >
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {hidden > 0 && (
               <motion.button
                 whileHover={{ color: "#86868b" }}
-                onClick={() => setShowAll(true)}
+                onClick={() => setShowAll((v) => !v)}
                 style={{
-                  background: "#1a1a1a",
+                  alignSelf: "flex-start",
+                  background: "rgba(255,255,255,0.04)",
                   border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 12, padding: "5px 10px",
-                  fontSize: 11, color: "#48484a", cursor: "pointer",
-                  display: "flex", alignItems: "center", gap: 3,
+                  borderRadius: 8, padding: "3px 8px",
+                  fontSize: 10.5, color: "#48484a", cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 3, fontFamily: "inherit",
                 }}
               >
-                +{hidden} more <ChevronDown size={11} />
-              </motion.button>
-            )}
-
-            {showAll && hidden > 0 && (
-              <motion.button
-                whileHover={{ color: "#86868b" }}
-                onClick={() => setShowAll(false)}
-                style={{
-                  background: "#1a1a1a",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 12, padding: "5px 10px",
-                  fontSize: 11, color: "#48484a", cursor: "pointer",
-                  display: "flex", alignItems: "center", gap: 3,
-                }}
-              >
-                Show less <ChevronUp size={11} />
+                {showAll ? <>Show less <ChevronUp size={10} /></> : <>+{hidden} more <ChevronDown size={10} /></>}
               </motion.button>
             )}
           </div>
@@ -215,13 +261,13 @@ export default function VideoCard({ video, animationDelay = 0 }) {
         {/* Footer: followers + chunks */}
         {(video.follower_count > 0 || video.chunks_stored > 0) && (
           <div style={{
-            paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.06)",
-            fontSize: 13, color: "#86868b",
+            paddingTop: 11, borderTop: "1px solid rgba(255,255,255,0.06)",
+            fontSize: 12, color: "#86868b",
           }}>
             {video.follower_count > 0 && (
-              <span><span style={{ color: "#f5f5f7", fontWeight: 500 }}>{fmt(video.follower_count)}</span> followers · </span>
+              <span><span style={{ color: "#f5f5f7", fontWeight: 600 }}>{fmt(video.follower_count)}</span> followers · </span>
             )}
-            <span><span style={{ color: "#f5f5f7", fontWeight: 500 }}>{video.chunks_stored || 0}</span> chunks indexed</span>
+            <span><span style={{ color: "#f5f5f7", fontWeight: 600 }}>{video.chunks_stored || 0}</span> chunks indexed</span>
           </div>
         )}
       </div>

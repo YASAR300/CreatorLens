@@ -1,7 +1,7 @@
 import React from "react";
 
 const BLOCK_STYLE = {
-  background: "#111111",
+  background: "#161616",
   borderRadius: "8px",
 };
 
@@ -24,9 +24,9 @@ export default function SkeletonVideoCard() {
   return (
     <div
       style={{
-        background: "#0a0a0a",
+        background: "#0c0c0c",
         border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: "20px",
+        borderRadius: 18,
         overflow: "hidden",
         boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
       }}
@@ -34,14 +34,14 @@ export default function SkeletonVideoCard() {
       {/* Thumbnail */}
       <div
         className="skeleton"
-        style={{ width: "100%", aspectRatio: "16/9", background: "#111111" }}
+        style={{ width: "100%", aspectRatio: "16/9", background: "#161616" }}
       />
 
-      <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "16px" }}>
+      <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "13px" }}>
         {/* Creator name + date */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          <SkeletonBlock width="52%" height="18px" />
-          <SkeletonBlock width="32%" height="13px" />
+        <div style={{ display: "flex", flexDirection: "column", gap: "7px" }}>
+          <SkeletonBlock width="52%" height="16px" />
+          <SkeletonBlock width="34%" height="12px" />
         </div>
 
         {/* Stats grid */}
@@ -56,23 +56,28 @@ export default function SkeletonVideoCard() {
           }}
         >
           {[0, 1, 2].map((i) => (
-            <div key={i} style={{ background: "#0a0a0a", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "6px" }}>
-              <SkeletonBlock width="36px" height="10px" />
-              <SkeletonBlock width="52px" height="16px" />
+            <div key={i} style={{ background: "#0c0c0c", padding: "10px 12px", display: "flex", flexDirection: "column", gap: "5px" }}>
+              <SkeletonBlock width="32px" height="9px" />
+              <SkeletonBlock width="46px" height="14px" />
             </div>
           ))}
         </div>
 
         {/* Engagement rate */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          <SkeletonBlock width="80px" height="32px" style={{ borderRadius: "10px" }} />
-          <SkeletonBlock width="110px" height="11px" />
+        <div style={{
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: "12px", padding: "12px 14px",
+          display: "flex", flexDirection: "column", gap: "6px",
+        }}>
+          <SkeletonBlock width="72px" height="26px" style={{ borderRadius: "8px" }} />
+          <SkeletonBlock width="96px" height="10px" />
         </div>
 
         {/* Hashtag pills */}
-        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-          {[50, 72, 58, 84, 48].map((w, i) => (
-            <SkeletonBlock key={i} width={`${w}px`} height="26px" style={{ borderRadius: "13px" }} />
+        <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+          {[44, 64, 50, 72].map((w, i) => (
+            <SkeletonBlock key={i} width={`${w}px`} height="22px" style={{ borderRadius: "8px" }} />
           ))}
         </div>
       </div>

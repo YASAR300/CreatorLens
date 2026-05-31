@@ -1,10 +1,9 @@
 'use client';
 
 import React from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { ExternalLink } from "lucide-react";
-import clsx from "clsx";
+import { ExternalLink, RefreshCw } from "lucide-react";
 
 /* ─── Citation pill with Radix tooltip ─── */
 function CitationPill({ cit, index }) {
@@ -287,10 +286,11 @@ function MarkdownRenderer({ text, showCursor }) {
 }
 
 /* ─── MessageBubble ─── */
-export default function MessageBubble({ message }) {
+export default function MessageBubble({ message, onRetry }) {
   const isUser = message.sender === "user";
   const streaming = message.isStreaming;
   const hasCitations = message.citations?.length > 0;
+  const isError = !!message.error;
 
   return (
     <motion.div
@@ -315,7 +315,8 @@ export default function MessageBubble({ message }) {
       <div style={{
         padding: "12px 16px",
         borderRadius: isUser ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
-        background: isUser ? "#0071e3" : "#111111",
+        background: isUser ? "#0071e3" : isError ? "rgba(255,69,58,0.12)" : "#111111",
+        border: isError ? "1px solid rgba(255,69,58,0.35)" : "none",
         color: "#f5f5f7",
         fontSize: 14,
         lineHeight: 1.65,
@@ -327,6 +328,23 @@ export default function MessageBubble({ message }) {
         {/* Message text rendered as beautiful markdown */}
         <MarkdownRenderer text={message.text} showCursor={streaming && !!message.text} />
       </div>
+
+      {/* Retry button on error */}
+      {isError && onRetry && (
+        <button
+          onClick={onRetry}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            background: "transparent",
+            border: "1px solid rgba(255,69,58,0.4)",
+            borderRadius: 8, padding: "4px 10px",
+            fontSize: 11, color: "#ff453a", cursor: "pointer",
+            fontFamily: "inherit", marginLeft: 4,
+          }}
+        >
+          <RefreshCw size={11} /> Retry
+        </button>
+      )}
 
       {/* Citations */}
       {!isUser && hasCitations && (

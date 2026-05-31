@@ -36,8 +36,8 @@ body {
 
 /* ─── Keyframes ─── */
 @keyframes skeleton-shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
 }
 
 @keyframes indeterminate-bar {
@@ -45,18 +45,37 @@ body {
   100% { transform: translateX(500%); }
 }
 
+/* Slightly irregular 530ms rhythm reads less robotic than a clean 500ms. */
 @keyframes blink-cursor {
   0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
+  50%      { opacity: 0; }
+}
+
+/* Apple's iOS element-entry curve: starts fast, eases gently into place. */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Subtle pop-in for small elements (suggestion chips, citation pills). */
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Horizontal sweep for the ProcessingBar. */
+@keyframes bar-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 /* ─── Animation utility classes ─── */
 .skeleton {
   background: linear-gradient(
     90deg,
-    rgba(255,255,255,0.00) 0%,
+    transparent 25%,
     rgba(255,255,255,0.06) 50%,
-    rgba(255,255,255,0.00) 100%
+    transparent 75%
   );
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.5s infinite linear;
@@ -67,7 +86,24 @@ body {
 }
 
 .blink-cursor {
-  animation: blink-cursor 500ms ease-in-out infinite;
+  animation: blink-cursor 530ms ease-in-out infinite;
+}
+
+.fade-in-up {
+  animation: fade-in-up 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.scale-in {
+  animation: scale-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ─── Typography utilities (not covered by Tailwind defaults) ─── */
+/* Apple's standard secondary label: small, medium, tracked-out uppercase. */
+.text-label-uppercase {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
 }
 
 /* ─── Apple focus ring ─── */
@@ -96,4 +132,14 @@ body {
 @keyframes slideUpAndFade {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Radar ripple for the chat EmptyState ─── */
+@keyframes pulse-ring {
+  0%   { transform: scale(0.8); opacity: 0.6; }
+  70%  { transform: scale(1.4); opacity: 0; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+.pulse-ring {
+  animation: pulse-ring 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
 }
