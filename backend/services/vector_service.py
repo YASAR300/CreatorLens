@@ -1,96 +1,151 @@
+"""
+vector_service.py — Qdrant-backed vector store with per-user isolation.
+
+Migrated from embedded ChromaDB to Qdrant Cloud so the system is multi-user and
+horizontally scalable. Every point is tagged with `user_id` and `video_id`, and
+every read/write is filtered by the current user so accounts never see each
+other's data.
+
+The current user is tracked via a ContextVar (`current_user_id`) set per request,
+which lets the existing BalancedRetriever (which has no user param) stay correct.
+
+Public contract (unchanged for callers):
+  - process_and_store(video_data) -> int
+  - clear_collection()
+  - retrieve_relevant_chunks(query, video_id_filter, k) -> List[(Document, float)]
+"""
 import os
 import re
+import uuid
 import logging
-from pathlib import Path
-from typing import List, Dict, Any, Tuple
+import contextvars
+from typing import List, Tuple
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
-# Configure logging
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 1. Compute absolute path for ChromaDB persist directory
-# Path(__file__).parent is backend/services
-# Path(__file__).parent.parent is backend
-DB_DIR = str(Path(__file__).parent.parent / "chroma_db")
-logger.info(f"VectorService absolute ChromaDB directory configured at: {DB_DIR}")
+COLLECTION = "creator_lens"
+EMBED_DIM = 384  # all-MiniLM-L6-v2
 
-# 2. Initialize stateless RecursiveCharacterTextSplitter globally
+# Per-request user scope. Defaults to a shared bucket if auth is somehow absent.
+current_user_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_user_id", default="anonymous"
+)
+
+
+def set_current_user(user_id: str) -> None:
+    current_user_id.set(user_id or "anonymous")
+
+
+# ── Text splitter ──
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=500,
     chunk_overlap=50,
     length_function=len,
-    separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""]
+    separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""],
 )
 
-# 3. Initialize global HuggingFaceEmbeddings model (loaded once at module import)
+# ── Embeddings (loaded once) ──
 logger.info("Loading HuggingFace Embeddings: all-MiniLM-L6-v2...")
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={'device': 'cpu'},
-    encode_kwargs={'normalize_embeddings': True}
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True},
 )
 
-# 4. Initialize global Chroma instance (persists connection globally)
-chroma_db = Chroma(
-    collection_name="creator_lens_transcripts",
-    persist_directory=DB_DIR,
-    embedding_function=embeddings
+# ── Qdrant client ──
+qdrant = QdrantClient(
+    url=os.getenv("QDRANT_URL"),
+    api_key=os.getenv("QDRANT_API_KEY"),
+    timeout=30,
 )
+
+
+def _ensure_collection() -> None:
+    """Create the collection once if it doesn't exist."""
+    try:
+        if not qdrant.collection_exists(COLLECTION):
+            qdrant.create_collection(
+                collection_name=COLLECTION,
+                vectors_config=qmodels.VectorParams(
+                    size=EMBED_DIM, distance=qmodels.Distance.COSINE
+                ),
+            )
+            # Index the fields we filter on for fast scoped queries.
+            for field in ("user_id", "video_id"):
+                try:
+                    qdrant.create_payload_index(
+                        COLLECTION, field_name=field,
+                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                    )
+                except Exception:
+                    pass
+            logger.info("Created Qdrant collection '%s'.", COLLECTION)
+    except Exception as exc:
+        logger.error("Could not ensure Qdrant collection: %s", exc)
+        raise
+
+
+_ensure_collection()
+
 
 def parse_first_timestamp(text: str) -> str:
-    """Find the first timestamp in the format [M:SS] or [MM:SS] within the text chunk and normalize to MM:SS."""
-    match = re.search(r'\[(\d+):(\d{2})\]', text)
+    match = re.search(r"\[(\d+):(\d{2})\]", text)
     if match:
         return f"{int(match.group(1)):02d}:{match.group(2)}"
     return "00:00"
 
-def _build_content_document(video_data: dict) -> str:
-    """
-    Build the richest possible text blob describing a video, used as a
-    guaranteed-present RAG document even when the spoken transcript is missing.
 
-    Combines title, creator, caption/description and (when available) the
-    transcript. For photo posts / transcription failures this caption-derived
-    text is what lets the bot answer "what is this video about?".
-    """
+def _build_content_document(video_data: dict) -> str:
+    """Richest text blob describing a video — always present, even with no transcript."""
     title = (video_data.get("title") or "").strip()
     creator = (video_data.get("creator") or "").strip()
-    # Instagram uses "caption", YouTube uses "description"
     description = (video_data.get("caption") or video_data.get("description") or "").strip()
     platform = video_data.get("platform", "")
 
-    header_parts = []
+    parts = []
     if title:
-        header_parts.append(f"Title: {title}")
+        parts.append(f"Title: {title}")
     if creator:
-        header_parts.append(f"Creator: {creator} ({platform})")
+        parts.append(f"Creator: {creator} ({platform})")
     if description:
-        header_parts.append(f"Description / Caption: {description}")
-    return "\n".join(header_parts).strip()
+        parts.append(f"Description / Caption: {description}")
+    return "\n".join(parts).strip()
+
+
+def _point_id(user_id: str, video_id: str, idx: int) -> str:
+    """Deterministic UUID so re-ingesting the same slot overwrites cleanly."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{user_id}/{video_id}/{idx}"))
+
+
+def _user_filter(user_id: str, video_id: str = None) -> qmodels.Filter:
+    must = [qmodels.FieldCondition(key="user_id", match=qmodels.MatchValue(value=user_id))]
+    if video_id:
+        must.append(qmodels.FieldCondition(key="video_id", match=qmodels.MatchValue(value=video_id)))
+    return qmodels.Filter(must=must)
 
 
 def process_and_store(video_data: dict) -> int:
     """
-    Split content into semantic chunks (500 chars, 50 overlap), tag chunks with
-    denormalized metadata, assign unique IDs, and persist in ChromaDB.
-
-    Content priority for embedding:
-      1. A "context" chunk built from title + creator + caption/description —
-         ALWAYS stored, so the bot can describe the video even with no transcript.
-      2. The spoken transcript split into timestamped chunks (when available).
-
-    This guarantees Video B is never reduced to the unhelpful
-    "No transcript available" placeholder.
+    Chunk content (overview chunk + transcript chunks), embed, and upsert into
+    Qdrant tagged with the current user_id and the video_id (A/B).
     """
+    user_id = current_user_id.get()
     video_id = video_data.get("video_id", "A")
     platform = video_data.get("platform", "youtube")
     creator = video_data.get("creator", "Unknown")
 
-    logger.info(f"Processing and storing content for Video {video_id} ({platform}) by {creator}")
+    logger.info("Storing content for user=%s Video %s (%s) by %s", user_id, video_id, platform, creator)
 
     transcript = video_data.get("transcript", "") or ""
     transcript_missing = (
@@ -98,6 +153,7 @@ def process_and_store(video_data: dict) -> int:
     )
 
     base_meta = {
+        "user_id": user_id,
         "video_id": video_id,
         "platform": platform,
         "creator": creator,
@@ -110,100 +166,76 @@ def process_and_store(video_data: dict) -> int:
         "tags": ", ".join(video_data.get("tags", [])) if isinstance(video_data.get("tags"), list) else str(video_data.get("tags", "")),
     }
 
-    chunk_texts: List[str] = []
-    chunk_metadatas: List[dict] = []
-    chunk_ids: List[str] = []
+    texts: List[str] = []
+    metas: List[dict] = []
     idx = 0
 
-    # 1. Always store a context/overview chunk from title + caption/description.
     context_doc = _build_content_document(video_data)
     if context_doc:
-        meta = dict(base_meta)
-        meta["chunk_index"] = idx
-        meta["timestamp"] = "00:00"
-        meta["content_type"] = "overview"
-        chunk_texts.append(context_doc)
-        chunk_metadatas.append(meta)
-        chunk_ids.append(f"{video_id}_{idx}")
-        idx += 1
+        m = dict(base_meta, chunk_index=idx, timestamp="00:00", content_type="overview")
+        texts.append(context_doc); metas.append(m); idx += 1
 
-    # 2. Store transcript chunks when a real transcript exists.
     if not transcript_missing:
         for chunk in text_splitter.split_text(transcript):
-            meta = dict(base_meta)
-            meta["chunk_index"] = idx
-            meta["timestamp"] = parse_first_timestamp(chunk)
-            meta["content_type"] = "transcript"
-            chunk_texts.append(chunk)
-            chunk_metadatas.append(meta)
-            chunk_ids.append(f"{video_id}_{idx}")
-            idx += 1
+            m = dict(base_meta, chunk_index=idx, timestamp=parse_first_timestamp(chunk), content_type="transcript")
+            texts.append(chunk); metas.append(m); idx += 1
     else:
-        logger.warning(
-            f"No spoken transcript for Video {video_id}; relying on the "
-            f"caption/metadata overview chunk for retrieval."
-        )
+        logger.warning("No transcript for Video %s; using overview chunk only.", video_id)
 
-    # 3. Absolute fallback: if somehow there's no content at all, store a stub
-    #    so retrieval filters still return a document for this video_id.
-    if not chunk_texts:
-        meta = dict(base_meta)
-        meta["chunk_index"] = 0
-        meta["timestamp"] = "00:00"
-        meta["content_type"] = "overview"
-        chunk_texts.append(
-            f"Video {video_id} by {creator} on {platform}. "
-            f"No transcript or caption was available; only engagement metrics are known."
-        )
-        chunk_metadatas.append(meta)
-        chunk_ids.append(f"{video_id}_0")
+    if not texts:
+        m = dict(base_meta, chunk_index=0, timestamp="00:00", content_type="overview")
+        texts.append(f"Video {video_id} by {creator} on {platform}. Only engagement metrics are known.")
+        metas.append(m)
 
-    logger.info(f"Created {len(chunk_texts)} chunks for Video {video_id}. Storing in ChromaDB...")
+    vectors = embeddings.embed_documents(texts)
+    points = []
+    for i, (text, meta, vec) in enumerate(zip(texts, metas, vectors)):
+        payload = dict(meta)
+        payload["page_content"] = text
+        points.append(qmodels.PointStruct(
+            id=_point_id(user_id, video_id, meta["chunk_index"]),
+            vector=vec,
+            payload=payload,
+        ))
 
-    chroma_db.add_texts(
-        texts=chunk_texts,
-        metadatas=chunk_metadatas,
-        ids=chunk_ids
-    )
+    qdrant.upsert(collection_name=COLLECTION, points=points)
+    logger.info("Upserted %d points for user=%s Video %s.", len(points), user_id, video_id)
+    return len(points)
 
-    chroma_db.persist()
-    logger.info(f"Successfully persisted {len(chunk_texts)} chunks to ChromaDB.")
 
-    return len(chunk_texts)
-
-def clear_collection():
-    """
-    Surgically clear the ChromaDB collection by deleting all stored document IDs.
-    This preserves the global ChromaDB client instance reference in memory.
-    """
-    logger.info("Resetting ChromaDB collection surgically...")
+def clear_collection() -> None:
+    """Delete only the CURRENT user's points (per-user reset)."""
+    user_id = current_user_id.get()
     try:
-        results = chroma_db.get()
-        all_ids = results.get("ids", [])
-        if all_ids:
-            chroma_db.delete(ids=all_ids)
-            logger.info(f"Surgically deleted {len(all_ids)} document IDs from ChromaDB.")
-        else:
-            logger.info("ChromaDB collection is already empty.")
-    except Exception as e:
-        logger.warning(f"Error surgically clearing ChromaDB collection: {str(e)}")
+        qdrant.delete(
+            collection_name=COLLECTION,
+            points_selector=qmodels.FilterSelector(filter=_user_filter(user_id)),
+        )
+        logger.info("Cleared Qdrant points for user=%s.", user_id)
+    except Exception as exc:
+        logger.warning("Error clearing Qdrant points for user=%s: %s", user_id, exc)
+
 
 def retrieve_relevant_chunks(query: str, video_id_filter: str = None, k: int = 5) -> List[Tuple[Document, float]]:
-    """
-    Query the vector store for top k semantically relevant chunks.
-    Allows filtering results exclusively by video_id ('A' or 'B').
-    
-    Returns a list of (Document, float) tuples containing the LangChain document and similarity distance score.
-    """
-    logger.info(f"Retrieving top {k} chunks for query: '{query}' (filter: {video_id_filter})")
-    
-    search_filter = {"video_id": video_id_filter} if video_id_filter else None
-    
-    results = chroma_db.similarity_search_with_score(
-        query=query,
-        k=k,
-        filter=search_filter
+    """Top-k semantically relevant chunks for the current user, optionally one video."""
+    user_id = current_user_id.get()
+    logger.info("Retrieving k=%d for user=%s query='%s' (video=%s)", k, user_id, query, video_id_filter)
+
+    qvec = embeddings.embed_query(query)
+    response = qdrant.query_points(
+        collection_name=COLLECTION,
+        query=qvec,
+        query_filter=_user_filter(user_id, video_id_filter),
+        limit=k,
+        with_payload=True,
     )
-    
-    logger.info(f"Retrieved {len(results)} chunks from similarity search.")
+    hits = response.points
+
+    results: List[Tuple[Document, float]] = []
+    for h in hits:
+        payload = dict(h.payload or {})
+        content = payload.pop("page_content", "")
+        results.append((Document(page_content=content, metadata=payload), float(h.score)))
+
+    logger.info("Retrieved %d chunks from Qdrant.", len(results))
     return results
