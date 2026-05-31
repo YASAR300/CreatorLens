@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { motion } from "framer-motion";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Clock } from "lucide-react";
 import clsx from "clsx";
 
 /* ─── Platform SVG icons ─── */
@@ -122,8 +122,20 @@ export default function VideoCard({ video, animationDelay = 0 }) {
               {video.title}
             </p>
           )}
-          <p style={{ fontSize: 13, color: "#86868b", margin: 0 }}>
-            {video.upload_date || "—"}{video.duration ? ` · ${video.duration}` : ""}
+          <p style={{ fontSize: 13, color: "#86868b", margin: 0, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+            <span>{video.upload_date || "—"}</span>
+            {video.upload_time ? <span style={{ color: "#48484a" }}>·</span> : null}
+            {video.upload_time ? <span>{video.upload_time}</span> : null}
+            {video.duration && video.duration !== "0:00" ? <span style={{ color: "#48484a" }}>·</span> : null}
+            {video.duration && video.duration !== "0:00" ? (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 3,
+                background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 8, padding: "1px 7px", fontSize: 12,
+              }}>
+                <Clock size={11} /> {video.duration}
+              </span>
+            ) : null}
           </p>
         </div>
 
