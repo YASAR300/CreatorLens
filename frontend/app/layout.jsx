@@ -1,5 +1,6 @@
 import { Inter } from "next/font/google";
 import { Toaster } from "react-hot-toast";
+import { AuthProvider } from "../hooks/useAuth";
 import "./globals.css";
 
 const inter = Inter({
@@ -20,7 +21,9 @@ export default function RootLayout({ children }) {
         <meta name="color-scheme" content="dark" />
       </head>
       <body className={`${inter.className} min-h-full antialiased`}>
-        {children}
+        <AuthProvider>
+          {children}
+        </AuthProvider>
         <Toaster
           position="top-right"
           toastOptions={{

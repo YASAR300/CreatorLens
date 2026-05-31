@@ -1,411 +1,192 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Eye, RefreshCw, Loader2, CheckCircle } from "lucide-react";
-import toast from "react-hot-toast";
-import VideoCard from "../components/VideoCard";
-import SkeletonVideoCard from "../components/SkeletonVideoCard";
-import ChatInterface from "../components/ChatInterface";
-import clsx from "clsx";
+import React, { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { motion } from "framer-motion";
+import {
+  Eye, ArrowRight, MessageSquareText, BarChart3, Database,
+  Zap, ShieldCheck, Quote,
+} from "lucide-react";
+import { useAuth } from "../hooks/useAuth";
 
-/* ─── Processing step messages ─── */
-const STEPS = [
-  { delay: 0,     text: "Initializing pipeline…" },
-  { delay: 3000,  text: "Fetching YouTube metadata & transcript…" },
-  { delay: 8000,  text: "Scraping Instagram post metadata…" },
-  { delay: 14000, text: "Downloading Reel audio via yt-dlp…" },
-  { delay: 20000, text: "Transcribing audio via Groq Whisper…" },
-  { delay: 42000, text: "Generating semantic embeddings…" },
-  { delay: 58000, text: "Indexing chunks to ChromaDB…" },
+const FEATURES = [
+  { icon: BarChart3, title: "Side-by-side metrics", body: "Views, likes, comments, follower counts and engagement rate for a YouTube video and an Instagram Reel — computed live." },
+  { icon: MessageSquareText, title: "Chat with transcripts", body: "Ask why one video outperformed the other. Answers stream in real time with inline citations to the exact source chunk." },
+  { icon: Database, title: "Vector-grounded RAG", body: "Transcripts are chunked, embedded and stored in Qdrant, so every answer is grounded in real content — not guesses." },
+  { icon: Zap, title: "Fast + low cost", body: "Groq Llama 3.3 70B for inference and local embeddings keep latency low and cost near zero at scale." },
+  { icon: ShieldCheck, title: "Private to you", body: "Every account's data is isolated. Your analyses and chats are scoped to your user and never shared." },
+  { icon: Eye, title: "Creator-first insights", body: "Compare hooks, pacing and strategy. Get concrete, numbered suggestions to improve the weaker video." },
 ];
 
-/* ─── SVG icons for inputs ─── */
-const YoutubeInputIcon = () => (
-  <svg viewBox="0 0 24 24" fill="#ff3333" width="15" height="15">
-    <path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.524 3.545 12 3.545 12 3.545s-7.525 0-9.388.51a3.002 3.002 0 0 0-2.11 2.108C0 8.029 0 12 0 12s0 3.972.502 5.837a3.003 3.003 0 0 0 2.11 2.108c1.863.51 9.388.51 9.388.51s7.525 0 9.388-.51a3.002 3.002 0 0 0 2.11-2.108C24 15.97 24 12 24 12s0-3.971-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-  </svg>
-);
+const STEPS = [
+  { n: "01", t: "Paste two URLs", d: "A YouTube video and an Instagram Reel." },
+  { n: "02", t: "We ingest both", d: "Scrape metadata, transcribe audio, embed and index." },
+  { n: "03", t: "Ask anything", d: "Chat with the data and get cited, streaming answers." },
+];
 
-const InstagramInputIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" width="15" height="15">
-    <defs>
-      <linearGradient id="ig" x1="0" y1="1" x2="1" y2="0">
-        <stop offset="0%" stopColor="#fcb045" />
-        <stop offset="50%" stopColor="#fd1d1d" />
-        <stop offset="100%" stopColor="#833ab4" />
-      </linearGradient>
-    </defs>
-    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" stroke="url(#ig)" strokeWidth="2" />
-    <circle cx="12" cy="12" r="4" stroke="url(#ig)" strokeWidth="2" />
-    <circle cx="17.5" cy="6.5" r="1.2" fill="#fd1d1d" />
-  </svg>
-);
+export default function Landing() {
+  const router = useRouter();
+  const { user, loading } = useAuth();
 
-/* ─── Page ─── */
-export default function Home() {
-  const [youtubeUrl, setYoutubeUrl] = useState("");
-  const [instagramUrl, setInstagramUrl] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processingStep, setProcessingStep] = useState("");
-  const [videoA, setVideoA] = useState(null);
-  const [videoB, setVideoB] = useState(null);
-  const [isResetting, setIsResetting] = useState(false);
-  const stepTimers = useRef([]);
+  // If already signed in, send straight to the app.
+  useEffect(() => {
+    if (!loading && user) router.replace("/app");
+  }, [loading, user, router]);
 
-  const clearTimers = () => { stepTimers.current.forEach(clearTimeout); stepTimers.current = []; };
-
-  const startSteps = () => {
-    clearTimers();
-    STEPS.forEach(({ delay, text }) => {
-      const t = setTimeout(() => setProcessingStep(text), delay);
-      stepTimers.current.push(t);
-    });
-  };
-
-  const handleAnalyze = async (e) => {
-    e.preventDefault();
-    if (!youtubeUrl.trim() || !instagramUrl.trim() || isProcessing) return;
-
-    setIsProcessing(true);
-    startSteps();
-    const tid = toast.loading("Analyzing videos… (30–90 seconds)");
-
-    try {
-      const res = await fetch("http://localhost:8000/api/videos/process", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ youtube_url: youtubeUrl.trim(), instagram_url: instagramUrl.trim() }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-        throw new Error(err.detail || `Server error ${res.status}`);
-      }
-
-      const data = await res.json();
-      setVideoA(data.video_a);
-      setVideoB(data.video_b);
-      const total = (data.video_a.chunks_stored || 0) + (data.video_b.chunks_stored || 0);
-      toast.success(`Done! ${total} chunks indexed in ChromaDB.`, { id: tid });
-    } catch (err) {
-      toast.error(err.message || "Processing failed. Check backend logs.", { id: tid });
-    } finally {
-      clearTimers();
-      setIsProcessing(false);
-      setProcessingStep("");
-    }
-  };
-
-  const handleReset = async () => {
-    setIsResetting(true);
-    try {
-      await fetch("http://localhost:8000/api/chat/reset", { method: "POST" });
-      setVideoA(null);
-      setVideoB(null);
-      setYoutubeUrl("");
-      setInstagramUrl("");
-      toast.success("Session reset.");
-    } catch {
-      toast.error("Failed to reset.");
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
-  const hasData = !!(videoA && videoB);
-  const showDashboard = hasData || isProcessing;
-
-  /* Shared input style */
-  const inputBase = {
-    flex: 1,
-    background: "#111111",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 12,
-    padding: "0 14px 0 40px",
-    height: 44,
-    fontSize: 14,
-    color: "#f5f5f7",
-    outline: "none",
-    width: "100%",
-    fontFamily: "inherit",
-    transition: "border-color 150ms ease, box-shadow 150ms ease",
-  };
-
-  const focusHandlers = {
-    onFocus: (e) => {
-      e.currentTarget.style.boxShadow = "0 0 0 3px rgba(0,113,227,0.3)";
-      e.currentTarget.style.borderColor = "rgba(0,113,227,0.5)";
-    },
-    onBlur: (e) => {
-      e.currentTarget.style.boxShadow = "none";
-      e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-    },
+  const fadeUp = {
+    initial: { opacity: 0, y: 24 },
+    whileInView: { opacity: 1, y: 0 },
+    viewport: { once: true, margin: "-80px" },
+    transition: { duration: 0.5, ease: [0.16, 1, 0.3, 1] },
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#000", color: "#f5f5f7", display: "flex", flexDirection: "column" }}>
+    <div style={{ background: "#000", color: "#f5f5f7", minHeight: "100vh", overflowX: "hidden" }}>
+      {/* Ambient glows */}
+      <div aria-hidden style={{ position: "fixed", top: -220, left: "50%", transform: "translateX(-50%)", width: 1100, height: 500, background: "radial-gradient(ellipse at center, rgba(0,113,227,0.16), transparent 70%)", filter: "blur(30px)", pointerEvents: "none", zIndex: 0 }} />
+      <div aria-hidden style={{ position: "fixed", bottom: -260, right: -120, width: 700, height: 600, background: "radial-gradient(ellipse at center, rgba(48,209,88,0.10), transparent 70%)", filter: "blur(30px)", pointerEvents: "none", zIndex: 0 }} />
 
-      {/* ══ TOP BAR ══ */}
-      <div style={{
-        background: "#0a0a0a",
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
-        position: "sticky", top: 0, zIndex: 40,
+      {/* Nav */}
+      <nav style={{
+        position: "sticky", top: 0, zIndex: 50,
+        background: "rgba(0,0,0,0.55)", backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)",
+        borderBottom: "1px solid rgba(255,255,255,0.07)",
       }}>
-
-        {/* Logo row */}
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "0 20px", height: 52,
-          borderBottom: "1px solid rgba(255,255,255,0.04)",
-        }}>
+        <div style={{ maxWidth: 1120, margin: "0 auto", padding: "0 24px", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{
-              width: 34, height: 34, borderRadius: 9,
-              background: "linear-gradient(135deg,#0071e3,#30d158)",
-              display: "flex", alignItems: "center", justifyContent: "center", color: "#fff",
-            }}>
-              <Eye size={18} />
+            <div style={{ width: 30, height: 30, borderRadius: 9, background: "linear-gradient(135deg,#0071e3,#30d158)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 12px rgba(0,113,227,0.35)" }}>
+              <Eye size={16} color="#fff" />
             </div>
-            <span style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7" }}>CreatorLens</span>
-            <span style={{
-              fontSize: 10, fontWeight: 500, color: "#86868b",
-              background: "#111", border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 6, padding: "1px 7px",
-            }}>RAG v1.0</span>
+            <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.2px" }}>CreatorLens</span>
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <motion.span
-                animate={{ scale: [1, 1.3, 1] }}
-                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                style={{ width: 7, height: 7, borderRadius: "50%", background: "#30d158", display: "inline-block" }}
-              />
-              <span style={{ fontSize: 11, color: "#86868b" }}>System Ready</span>
-            </div>
-
-            {hasData && (
-              <motion.button
-                whileHover={{ color: "#f5f5f7" }}
-                whileTap={{ scale: 0.97 }}
-                onClick={handleReset}
-                disabled={isResetting}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "6px 14px",
-                  background: "#111", border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 8, fontSize: 12, fontWeight: 500, color: "#86868b",
-                  cursor: "pointer",
-                }}
-              >
-                <RefreshCw size={13} />
-                {isResetting ? "Resetting…" : "Reset Session"}
-              </motion.button>
-            )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Link href="/login" style={{ fontSize: 13.5, color: "#cccccc", textDecoration: "none", padding: "8px 12px" }}>Sign in</Link>
+            <Link href="/register" style={{ fontSize: 13.5, fontWeight: 500, color: "#fff", textDecoration: "none", background: "#0071e3", padding: "8px 16px", borderRadius: 980, boxShadow: "0 2px 12px rgba(0,113,227,0.35)" }}>
+              Get started
+            </Link>
           </div>
         </div>
+      </nav>
 
-        {/* URL form row */}
-        <form onSubmit={handleAnalyze} style={{
-          display: "flex", alignItems: "center", gap: 10,
-          padding: "0 20px", height: 60,
-        }}>
-          {/* YouTube */}
-          <div style={{ flex: 1, position: "relative" }}>
-            <span style={{
-              position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
-              display: "flex", alignItems: "center", pointerEvents: "none",
-            }}>
-              <YoutubeInputIcon />
-            </span>
-            <input
-              type="url" required disabled={isProcessing}
-              placeholder="https://www.youtube.com/watch?v=…"
-              value={youtubeUrl}
-              onChange={(e) => setYoutubeUrl(e.target.value)}
-              style={inputBase}
-              {...focusHandlers}
-            />
-          </div>
-
-          {/* Instagram */}
-          <div style={{ flex: 1, position: "relative" }}>
-            <span style={{
-              position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
-              display: "flex", alignItems: "center", pointerEvents: "none",
-            }}>
-              <InstagramInputIcon />
-            </span>
-            <input
-              type="url" required disabled={isProcessing}
-              placeholder="https://www.instagram.com/reel/…"
-              value={instagramUrl}
-              onChange={(e) => setInstagramUrl(e.target.value)}
-              style={inputBase}
-              {...focusHandlers}
-            />
-          </div>
-
-          {/* Analyze button */}
-          <motion.button
-            type="submit"
-            disabled={isProcessing}
-            whileHover={!isProcessing ? { background: "#0077ed", scale: 1.01 } : {}}
-            whileTap={!isProcessing ? { scale: 0.99 } : {}}
-            style={{
-              height: 44, padding: "0 20px",
-              background: "#0071e3", border: "none", borderRadius: 12,
-              fontSize: 14, fontWeight: 500, color: "#fff",
-              cursor: isProcessing ? "not-allowed" : "pointer",
-              opacity: isProcessing ? 0.7 : 1,
-              display: "flex", alignItems: "center", gap: 8,
-              flexShrink: 0, whiteSpace: "nowrap",
-            }}
-          >
-            {isProcessing
-              ? <><Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> Analyzing…</>
-              : "Analyze Videos"
-            }
-          </motion.button>
-        </form>
-
-        {/* Progress bar + step */}
-        <AnimatePresence>
-          {isProcessing && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              style={{ padding: "6px 20px 10px", overflow: "hidden" }}
-            >
-              <div style={{
-                height: 2, background: "rgba(255,255,255,0.06)",
-                borderRadius: 1, overflow: "hidden", marginBottom: 6,
-              }}>
-                <div
-                  className="indeterminate-bar"
-                  style={{
-                    height: "100%", width: "20%",
-                    background: "linear-gradient(90deg, transparent, #0071e3, transparent)",
-                  }}
-                />
-              </div>
-              <motion.p
-                key={processingStep}
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                style={{ fontSize: 12, color: "#86868b", margin: 0 }}
-              >
-                {processingStep}
-              </motion.p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* ══ MAIN CONTENT ══ */}
-      {!showDashboard ? (
-        /* Landing */
+      {/* Hero */}
+      <section style={{ position: "relative", zIndex: 1, maxWidth: 920, margin: "0 auto", padding: "96px 24px 72px", textAlign: "center" }}>
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          style={{
-            flex: 1, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            padding: "60px 20px", textAlign: "center",
-          }}
-        >
-          <motion.div
-            animate={{ scale: [1, 1.05, 1] }}
-            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-            style={{
-              width: 72, height: 72,
-              background: "linear-gradient(135deg, rgba(0,113,227,0.12), rgba(48,209,88,0.12))",
-              border: "1px solid rgba(0,113,227,0.2)",
-              borderRadius: 22,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              marginBottom: 24, color: "#0071e3",
-            }}
-          >
-            <Eye size={28} />
-          </motion.div>
-
-          <h1 style={{ fontSize: 36, fontWeight: 600, color: "#f5f5f7", margin: "0 0 14px", letterSpacing: "-0.5px" }}>
-            Analyze Social Growth with RAG
-          </h1>
-          <p style={{ fontSize: 16, color: "#86868b", maxWidth: 480, lineHeight: 1.6, margin: 0 }}>
-            Enter a YouTube URL and Instagram Reel URL above to compare their transcripts,
-            engagement metrics, and creator strategy using AI.
-          </p>
+          initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 12px", borderRadius: 980, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", fontSize: 12, color: "#86868b", marginBottom: 26 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#30d158" }} />
+          RAG-powered creator analytics
         </motion.div>
 
-      ) : (
-        /* Dashboard — 2-column */
-        <div style={{
-          flex: 1, display: "grid",
-          gridTemplateColumns: "1fr 480px",
-          minHeight: 0,
-        }}>
-          {/* Left: cards */}
-          <div style={{ overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 20 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div>
-                <h2 style={{ fontSize: 17, fontWeight: 600, color: "#f5f5f7", margin: "0 0 2px" }}>Comparison</h2>
-                <p style={{ fontSize: 13, color: "#86868b", margin: 0 }}>
-                  {isProcessing ? processingStep || "Processing…" : "Live metrics from scraped data"}
-                </p>
+        <motion.h1
+          initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+          style={{ fontSize: "clamp(40px, 7vw, 68px)", fontWeight: 600, lineHeight: 1.05, letterSpacing: "-1.5px", margin: "0 0 22px" }}>
+          Compare your videos.<br />
+          <span style={{ background: "linear-gradient(90deg,#0071e3,#30d158)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>
+            Chat with the data.
+          </span>
+        </motion.h1>
+
+        <motion.p
+          initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
+          style={{ fontSize: 18, color: "#86868b", maxWidth: 600, margin: "0 auto 34px", lineHeight: 1.6 }}>
+          Drop in a YouTube video and an Instagram Reel. CreatorLens pulls the metrics,
+          transcribes the audio, and lets you ask why one wins — with cited, streaming answers.
+        </motion.p>
+
+        <motion.div
+          initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55, delay: 0.16, ease: [0.16, 1, 0.3, 1] }}
+          style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+          <Link href="/register" style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 15, fontWeight: 500, color: "#fff", textDecoration: "none", background: "#0071e3", padding: "13px 26px", borderRadius: 980, boxShadow: "0 4px 20px rgba(0,113,227,0.4)" }}>
+            Start free <ArrowRight size={16} />
+          </Link>
+          <Link href="/login" style={{ display: "inline-flex", alignItems: "center", fontSize: 15, fontWeight: 500, color: "#f5f5f7", textDecoration: "none", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", padding: "13px 26px", borderRadius: 980 }}>
+            Sign in
+          </Link>
+        </motion.div>
+
+        {/* Mock product frame */}
+        <motion.div
+          initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, delay: 0.24, ease: [0.16, 1, 0.3, 1] }}
+          style={{ marginTop: 60, borderRadius: 18, border: "1px solid rgba(255,255,255,0.1)", background: "linear-gradient(180deg,#0c0c0c,#070707)", boxShadow: "0 30px 80px rgba(0,0,0,0.6)", overflow: "hidden", textAlign: "left" }}>
+          <div style={{ height: 38, borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 7, padding: "0 14px" }}>
+            {["#ff5f57", "#febc2e", "#28c840"].map((c) => <span key={c} style={{ width: 11, height: 11, borderRadius: "50%", background: c }} />)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, padding: 18 }}>
+            {[["YouTube", "1.21%", "#ff3b30"], ["Instagram", "3.84%", "#c13584"]].map(([p, er, col]) => (
+              <div key={p} style={{ background: "#0c0c0c", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 16 }}>
+                <div style={{ height: 88, borderRadius: 10, background: `linear-gradient(135deg, ${col}33, transparent)`, marginBottom: 12 }} />
+                <div className="text-label-uppercase" style={{ fontSize: 10, color: "#86868b" }}>{p} · Engagement</div>
+                <div style={{ fontSize: 26, fontWeight: 700, background: "linear-gradient(90deg,#30d158,#0071e3)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{er}</div>
               </div>
-              {hasData && (
-                <motion.span
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  style={{
-                    fontSize: 11, color: "#30d158",
-                    background: "rgba(48,209,88,0.1)", border: "1px solid rgba(48,209,88,0.2)",
-                    borderRadius: 6, padding: "3px 10px", fontWeight: 500,
-                    display: "flex", alignItems: "center", gap: 5,
-                  }}
-                >
-                  <CheckCircle size={12} /> Indexed in ChromaDB
-                </motion.span>
-              )}
-            </div>
-
-            {isProcessing ? (
-              <>
-                <SkeletonVideoCard />
-                <SkeletonVideoCard />
-              </>
-            ) : (
-              <AnimatePresence>
-                {videoA && <VideoCard key="a" video={videoA} animationDelay={0} />}
-                {videoB && <VideoCard key="b" video={videoB} animationDelay={100} />}
-              </AnimatePresence>
-            )}
+            ))}
           </div>
+        </motion.div>
+      </section>
 
-          {/* Right: chat */}
-          <div style={{ position: "sticky", top: 0, height: "calc(100vh - 114px)", overflow: "hidden" }}>
-            <ChatInterface />
-          </div>
+      {/* Features */}
+      <section style={{ position: "relative", zIndex: 1, maxWidth: 1120, margin: "0 auto", padding: "40px 24px 20px" }}>
+        <motion.h2 {...fadeUp} style={{ fontSize: "clamp(28px,4vw,40px)", fontWeight: 600, letterSpacing: "-0.8px", textAlign: "center", margin: "0 0 12px" }}>
+          Everything a creator needs to compare and improve
+        </motion.h2>
+        <motion.p {...fadeUp} style={{ color: "#86868b", textAlign: "center", maxWidth: 560, margin: "0 auto 48px", fontSize: 16 }}>
+          Built on a real RAG pipeline — not canned responses.
+        </motion.p>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+          {FEATURES.map((f, i) => (
+            <motion.div key={f.title}
+              initial={{ opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, margin: "-60px" }}
+              transition={{ duration: 0.45, delay: (i % 3) * 0.06, ease: [0.16, 1, 0.3, 1] }}
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 22 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 11, background: "rgba(0,113,227,0.12)", border: "1px solid rgba(0,113,227,0.22)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14 }}>
+                <f.icon size={18} color="#0071e3" />
+              </div>
+              <h3 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 7px", letterSpacing: "-0.2px" }}>{f.title}</h3>
+              <p style={{ fontSize: 14, color: "#86868b", lineHeight: 1.6, margin: 0 }}>{f.body}</p>
+            </motion.div>
+          ))}
         </div>
-      )}
+      </section>
 
-      {/* Responsive: stack on < 1024px */}
-      <style>{`
-        @media (max-width: 1023px) {
-          [style*="grid-template-columns: 1fr 480px"] {
-            grid-template-columns: 1fr !important;
-          }
-          [style*="position: sticky; top: 0; height: calc(100vh - 114px)"] {
-            position: relative !important;
-            height: 520px !important;
-          }
-        }
-        @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-      `}</style>
+      {/* How it works */}
+      <section style={{ position: "relative", zIndex: 1, maxWidth: 1120, margin: "0 auto", padding: "64px 24px" }}>
+        <motion.h2 {...fadeUp} style={{ fontSize: "clamp(28px,4vw,40px)", fontWeight: 600, letterSpacing: "-0.8px", textAlign: "center", margin: "0 0 48px" }}>
+          Three steps to insight
+        </motion.h2>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
+          {STEPS.map((s, i) => (
+            <motion.div key={s.n}
+              initial={{ opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, margin: "-60px" }}
+              transition={{ duration: 0.45, delay: i * 0.08, ease: [0.16, 1, 0.3, 1] }}
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#0071e3", marginBottom: 12 }}>{s.n}</div>
+              <h3 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 7px" }}>{s.t}</h3>
+              <p style={{ fontSize: 14, color: "#86868b", lineHeight: 1.6, margin: 0 }}>{s.d}</p>
+            </motion.div>
+          ))}
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section style={{ position: "relative", zIndex: 1, maxWidth: 760, margin: "0 auto", padding: "40px 24px 100px", textAlign: "center" }}>
+        <motion.div {...fadeUp} style={{ borderRadius: 24, border: "1px solid rgba(255,255,255,0.1)", background: "linear-gradient(135deg, rgba(0,113,227,0.12), rgba(48,209,88,0.08))", padding: "56px 28px" }}>
+          <Quote size={26} color="#0071e3" style={{ marginBottom: 14 }} />
+          <h2 style={{ fontSize: "clamp(26px,4vw,36px)", fontWeight: 600, letterSpacing: "-0.6px", margin: "0 0 14px" }}>
+            Stop guessing why content works.
+          </h2>
+          <p style={{ color: "#86868b", fontSize: 16, margin: "0 0 28px" }}>
+            Create a free account and run your first comparison in under a minute.
+          </p>
+          <Link href="/register" style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 15, fontWeight: 500, color: "#fff", textDecoration: "none", background: "#0071e3", padding: "13px 28px", borderRadius: 980, boxShadow: "0 4px 20px rgba(0,113,227,0.4)" }}>
+            Get started free <ArrowRight size={16} />
+          </Link>
+        </motion.div>
+      </section>
+
+      <footer style={{ position: "relative", zIndex: 1, borderTop: "1px solid rgba(255,255,255,0.07)", padding: "24px", textAlign: "center", color: "#48484a", fontSize: 12.5 }}>
+        CreatorLens · Built with FastAPI, Qdrant, LangChain & Groq
+      </footer>
     </div>
   );
 }
