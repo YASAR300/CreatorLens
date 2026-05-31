@@ -12,6 +12,11 @@ const inter = Inter({
 export const metadata = {
   title: "CreatorLens — Video Analytics",
   description: "AI-powered social media video comparison",
+  icons: {
+    icon: "/logo.png",
+    shortcut: "/logo.png",
+    apple: "/logo.png",
+  },
 };
 
 export default function RootLayout({ children }) {
