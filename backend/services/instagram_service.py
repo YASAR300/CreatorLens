@@ -11,15 +11,111 @@ matching the exact contract and schema of the YouTube service.
 
 import os
 import re
+import shutil
 import logging
 from datetime import datetime
 import tempfile
 import instaloader
-from instaloader.exceptions import InstaloaderException, LoginRequiredException
+from instaloader.exceptions import (
+    InstaloaderException,
+    LoginRequiredException,
+    ConnectionException,
+    TwoFactorAuthRequiredException,
+)
 import yt_dlp
 from groq import Groq
 
 logger = logging.getLogger(__name__)
+
+# Directory where instaloader session files are persisted so we don't have to
+# re-login (and re-trigger Instagram's suspicious-login challenges) every run.
+SESSION_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ig_sessions")
+
+# Local scratch directory for downloaded reel audio (backend/tmp). Using an
+# absolute, OS-correct path instead of a hard-coded "/tmp" (which is invalid on
+# Windows) means the audio file is reliably found and handed to Whisper.
+TMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
+
+
+def _session_file_for(username: str) -> str:
+    """Absolute path of the saved session file for a given Instagram username."""
+    return os.path.join(SESSION_DIR, f"session-{username}")
+
+
+def _get_authenticated_loader() -> instaloader.Instaloader:
+    """
+    Build an Instaloader instance, authenticated when possible.
+
+    Auth strategy (most reliable first):
+      1. If a saved session file exists for INSTAGRAM_USERNAME, load it.
+         Saved sessions survive restarts and avoid Instagram's repeated
+         "suspicious login" / checkpoint challenges that break password login.
+      2. Otherwise, if INSTAGRAM_USERNAME + INSTAGRAM_PASSWORD are set, log in
+         with the password and SAVE the resulting session for next time.
+      3. Otherwise (or on any failure), fall back to anonymous scraping.
+
+    Never raises — login problems degrade gracefully to anonymous mode so the
+    rest of the pipeline keeps working.
+    """
+    loader = instaloader.Instaloader()
+    loader.dirname_pattern = "tmp"
+
+    username = os.getenv("INSTAGRAM_USERNAME")
+    password = os.getenv("INSTAGRAM_PASSWORD")
+
+    if not username:
+        logger.info("No INSTAGRAM_USERNAME set; scraping Instagram anonymously.")
+        return loader
+
+    session_file = _session_file_for(username)
+
+    # 1. Try a previously saved session first.
+    if os.path.exists(session_file):
+        try:
+            loader.load_session_from_file(username, session_file)
+            logger.info("Loaded saved Instagram session for '%s' from %s", username, session_file)
+            return loader
+        except Exception as load_exc:
+            logger.warning(
+                "Could not load saved session for '%s' (%s). Will try password login.",
+                username, load_exc,
+            )
+
+    # 2. Fall back to password login, then persist the session on success.
+    if password:
+        logger.info("Logging in to Instagram as '%s' via password...", username)
+        try:
+            loader.login(username, password)
+            try:
+                os.makedirs(SESSION_DIR, exist_ok=True)
+                loader.save_session_to_file(session_file)
+                logger.info("Saved Instagram session for '%s' to %s", username, session_file)
+            except Exception as save_exc:
+                logger.warning("Login succeeded but saving session failed: %s", save_exc)
+            return loader
+        except TwoFactorAuthRequiredException:
+            logger.warning(
+                "Instagram account '%s' has 2FA enabled. Password login can't complete here. "
+                "Create a session once via: instaloader --login=%s  then place the session file in %s. "
+                "Proceeding anonymously.",
+                username, username, SESSION_DIR,
+            )
+        except ConnectionException as conn_exc:
+            logger.warning(
+                "Instagram login blocked/challenged for '%s' (%s). "
+                "Create a session once via: instaloader --login=%s  then place the session file in %s. "
+                "Proceeding anonymously.",
+                username, conn_exc, username, SESSION_DIR,
+            )
+        except Exception as login_exc:
+            logger.warning("Instagram login failed: %s. Proceeding anonymously.", login_exc)
+    else:
+        logger.info(
+            "INSTAGRAM_PASSWORD not set and no saved session found for '%s'; scraping anonymously.",
+            username,
+        )
+
+    return loader
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +146,92 @@ def extract_shortcode(url: str) -> str:
 # Step 2 & 3 — Metadata Fetch via instaloader with Auth & Rate Limit Handling
 # ---------------------------------------------------------------------------
 
+def _extract_view_count(post) -> int:
+    """
+    Robustly resolve the view/play count for a Reel.
+
+    instaloader's `post.video_view_count` and `post.video_play_count` frequently
+    return None for Reels fetched anonymously, because Instagram serves the count
+    under one of several shifting raw-metadata keys. We probe the public
+    properties first, then fall back to digging the raw node / full-metadata dict
+    via `post._field()`, and finally the logged-in mobile (iPhone) API struct,
+    which is the most reliable source when the GraphQL endpoint returns 403.
+
+    Returns 0 for non-video posts (e.g. photo carousels), which is correct.
+    """
+    # 1. Public properties (guarded by is_video internally)
+    for prop in ("video_view_count", "video_play_count"):
+        try:
+            val = getattr(post, prop, None)
+            if val:
+                return int(val)
+        except Exception:
+            pass
+
+    # 2. Raw metadata keys (covers Reels + older/newer GraphQL schemas)
+    raw_keys = (
+        "video_play_count",
+        "play_count",
+        "video_view_count",
+        "view_count",
+        "ig_play_count",
+    )
+    for key in raw_keys:
+        try:
+            val = post._field(key)
+            if val:
+                return int(val)
+        except Exception:
+            continue
+
+    # 3. Logged-in mobile API struct (works when GraphQL is 403'd)
+    try:
+        struct = post._iphone_struct
+        for key in ("play_count", "ig_play_count", "view_count", "video_view_count"):
+            val = struct.get(key)
+            if val:
+                return int(val)
+    except Exception:
+        pass
+
+    return 0
+
+
+def _extract_duration_seconds(post) -> int:
+    """
+    Resolve the video duration in whole seconds, with the same multi-source
+    fallback strategy as view count. Returns 0 for non-video posts.
+    """
+    # 1. Public property
+    try:
+        val = getattr(post, "video_duration", None)
+        if val:
+            return int(float(val))
+    except Exception:
+        pass
+
+    # 2. Raw metadata
+    for key in ("video_duration", "duration"):
+        try:
+            val = post._field(key)
+            if val:
+                return int(float(val))
+        except Exception:
+            continue
+
+    # 3. Mobile API struct
+    try:
+        struct = post._iphone_struct
+        for key in ("video_duration", "duration"):
+            val = struct.get(key)
+            if val:
+                return int(float(val))
+    except Exception:
+        pass
+
+    return 0
+
+
 def _fetch_metadata(url: str, shortcode: str) -> dict:
     """
     Scrape Instagram post metadata using instaloader.
@@ -64,26 +246,16 @@ def _fetch_metadata(url: str, shortcode: str) -> dict:
     Raises RuntimeError with friendly clean messages on exceptions so raw
     instaloader exceptions never bubble up to the API response.
     """
-    loader = instaloader.Instaloader()
-    loader.dirname_pattern = "tmp"
-
-    # Progressive login check
-    username = os.getenv("INSTAGRAM_USERNAME")
-    password = os.getenv("INSTAGRAM_PASSWORD")
-
-    if username and password:
-        logger.info("Logging in to Instagram as user: %s", username)
-        try:
-            loader.login(username, password)
-        except Exception as login_exc:
-            logger.warning("Instagram login failed: %s. Proceeding anonymously.", login_exc)
+    # Build an authenticated loader (saved session preferred, password fallback,
+    # anonymous as last resort). Never raises.
+    loader = _get_authenticated_loader()
 
     try:
         logger.info("Scraping metadata for Instagram shortcode: %s", shortcode)
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
 
         # Extract counts
-        views = post.video_view_count or 0
+        views = _extract_view_count(post)
         likes = post.likes or 0
         comments = post.comments or 0
 
@@ -99,25 +271,31 @@ def _fetch_metadata(url: str, shortcode: str) -> dict:
         # Hashtags
         tags = post.caption_hashtags or []
 
-        # Upload date: datetime object → "Month Day, Year"
+        # Upload date & time: datetime object → "Month Day, Year" + "HH:MM"
         upload_date = "Unknown"
+        upload_time = ""
         if post.date:
             upload_date = post.date.strftime("%B %d, %Y")
+            upload_time = post.date.strftime("%H:%M")
 
-        # Duration: float → "minutes:seconds"
-        duration_secs = post.video_duration or 0.0
-        minutes, seconds = divmod(int(duration_secs), 60)
+        # Duration: float seconds → "minutes:seconds" + keep raw seconds
+        duration_secs = _extract_duration_seconds(post)
+        minutes, seconds = divmod(duration_secs, 60)
         duration = f"{minutes}:{seconds:02d}"
 
         # Thumbnail: fall back to post.url (direct CDN URL)
         thumbnail_url = post.url or ""
 
-        # Title: first 60 characters of caption, or default
+        # Caption: keep the FULL caption — it's the richest description of what
+        # the post is about and becomes searchable RAG content downstream.
         caption = post.caption or ""
         title = caption[:60] + "..." if len(caption) > 60 else (caption or f"Instagram Reel {shortcode}")
+        is_video = bool(getattr(post, "is_video", False))
 
         return {
             "title": title,
+            "caption": caption,
+            "is_video": is_video,
             "creator": creator,
             "subscriber_count": subscriber_count,
             "views": views,
@@ -125,7 +303,9 @@ def _fetch_metadata(url: str, shortcode: str) -> dict:
             "comments": comments,
             "tags": tags,
             "upload_date": upload_date,
+            "upload_time": upload_time,
             "duration": duration,
+            "duration_seconds": duration_secs,
             "thumbnail_url": thumbnail_url,
         }
 
@@ -157,6 +337,12 @@ def _fetch_transcript(url: str, shortcode: str) -> str:
 
     Timestamp segments are formatted as [minutes:seconds] to provide clean citations.
 
+    Works WITHOUT ffmpeg: if ffmpeg is unavailable we skip the FFmpegExtractAudio
+    post-processor and hand the raw audio container (m4a/webm/mp4) straight to
+    Groq Whisper, which accepts all of those formats natively. This removes a
+    hard system dependency that previously caused every Instagram transcription
+    to silently fail.
+
     Returns the fallback string on transcript/network failures so metadata
     ingestion remains non-blocking.
     """
@@ -164,52 +350,58 @@ def _fetch_transcript(url: str, shortcode: str) -> str:
         logger.warning("GROQ_API_KEY is not set. Cannot run Groq transcription.")
         return "Transcript not available for this video."
 
-    audio_path = f"/tmp/instagram_audio_{shortcode}.mp3"
-    normalized_path = os.path.normpath(audio_path)
+    os.makedirs(TMP_DIR, exist_ok=True)
+    out_template = os.path.join(TMP_DIR, f"ig_audio_{shortcode}.%(ext)s")
+    downloaded_files: list = []
+
+    ffmpeg_available = shutil.which("ffmpeg") is not None
 
     try:
-        # Ensure /tmp directory exists on Windows/Unix
-        try:
-            os.makedirs("/tmp", exist_ok=True)
-        except Exception:
-            pass
-
-        # Configure yt-dlp for high-quality audio extraction via FFmpeg
         ydl_opts = {
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-            }],
-            "outtmpl": "/tmp/instagram_audio_%(id)s.%(ext)s",
+            # Prefer m4a audio (small, Whisper-friendly); fall back to any audio/best.
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "outtmpl": out_template,
             "quiet": True,
             "no_warnings": True,
+            "noplaylist": True,
         }
+        # Only convert to mp3 when ffmpeg exists; otherwise keep the raw container.
+        if ffmpeg_available:
+            ydl_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+            }]
+        else:
+            logger.warning(
+                "ffmpeg not found — sending raw audio container to Whisper "
+                "(no conversion). Install ffmpeg for smaller uploads."
+            )
 
-        logger.info("Downloading Instagram Reel audio stream using yt-dlp for URL: %s", url)
+        logger.info("Downloading Instagram Reel audio via yt-dlp for: %s", url)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # Resolve paths for both Windows and Unix environments
-        if not os.path.exists(normalized_path) and not os.path.exists(audio_path):
-            tmp_dir = "/tmp"
-            if os.path.exists(tmp_dir):
-                for file_name in os.listdir(tmp_dir):
-                    if shortcode in file_name and file_name.endswith(".mp3"):
-                        audio_path = os.path.join(tmp_dir, file_name)
-                        normalized_path = os.path.normpath(audio_path)
-                        break
+        # Locate whatever file yt-dlp actually produced for this shortcode.
+        for file_name in os.listdir(TMP_DIR):
+            if file_name.startswith(f"ig_audio_{shortcode}") and file_name.endswith(
+                (".mp3", ".m4a", ".webm", ".mp4", ".wav", ".ogg", ".opus", ".aac")
+            ):
+                downloaded_files.append(os.path.join(TMP_DIR, file_name))
 
-        open_path = normalized_path if os.path.exists(normalized_path) else audio_path
-        if not os.path.exists(open_path):
-            raise FileNotFoundError(f"Could not find downloaded audio file at {open_path}")
+        if not downloaded_files:
+            raise FileNotFoundError(
+                f"yt-dlp did not produce an audio file for shortcode {shortcode}"
+            )
 
-        # Transcribe audio using Groq Whisper API
+        # Prefer mp3/m4a if multiple variants exist.
+        downloaded_files.sort(key=lambda p: (not p.endswith((".mp3", ".m4a")), len(p)))
+        open_path = downloaded_files[0]
+
         logger.info("Submitting audio %s to Groq Whisper whisper-large-v3", open_path)
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         with open(open_path, "rb") as f:
             transcription = client.audio.transcriptions.create(
-                file=(f"instagram_audio_{shortcode}.mp3", f),
+                file=(os.path.basename(open_path), f.read()),
                 model="whisper-large-v3",
                 response_format="verbose_json",
                 timestamp_granularities=["segment"],
@@ -251,7 +443,7 @@ def _fetch_transcript(url: str, shortcode: str) -> str:
 
     finally:
         # Guarantee audio file cleanup to protect storage
-        for path_to_clean in [audio_path, normalized_path]:
+        for path_to_clean in downloaded_files:
             if path_to_clean and os.path.exists(path_to_clean):
                 try:
                     os.remove(path_to_clean)
@@ -295,8 +487,13 @@ def get_instagram_data(url: str) -> dict:
     # 2. Scrape metadata (raises error on rate-limit/login block)
     meta = _fetch_metadata(url, shortcode)
 
-    # 3. Transcript fetch (non-fatal, falls back safely)
-    transcript = _fetch_transcript(url, shortcode)
+    # 3. Transcript fetch — only for actual videos. Photo posts/carousels have
+    #    no audio track, so we skip the (pointless, slow) download attempt.
+    if meta.get("is_video"):
+        transcript = _fetch_transcript(url, shortcode)
+    else:
+        logger.info("Post %s is not a video (no audio); skipping transcription.", shortcode)
+        transcript = "Transcript not available for this video."
 
     # 4. Engagement rate
     engagement_rate = _compute_engagement_rate(
@@ -309,6 +506,7 @@ def get_instagram_data(url: str) -> dict:
         "platform": "instagram",
         "url": url,
         "title": meta["title"],
+        "caption": meta.get("caption", ""),
         "transcript": transcript,
         "creator": meta["creator"],
         "subscriber_count": meta["subscriber_count"],
@@ -318,7 +516,9 @@ def get_instagram_data(url: str) -> dict:
         "engagement_rate": engagement_rate,
         "tags": meta["tags"],
         "upload_date": meta["upload_date"],
+        "upload_time": meta["upload_time"],
         "duration": meta["duration"],
+        "duration_seconds": meta["duration_seconds"],
         "thumbnail_url": meta["thumbnail_url"],
     }
 
