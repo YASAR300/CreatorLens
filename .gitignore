@@ -30,3 +30,12 @@ temp_downloads/
 *.mp3
 *.wav
 *.m4a
+
+# Instagram session files (contain authenticated session cookies — NEVER commit)
+ig_sessions/
+backend/ig_sessions/
+session-*
+
+# Editor / IDE settings
+.vscode/
+.idea/
