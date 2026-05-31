@@ -13,7 +13,8 @@ langchain-text-splitters==1.1.2
 groq==0.37.1
 
 # ── Embeddings & vector store ──
-sentence-transformers==5.5.1
+# fastembed = ONNX embeddings (no torch/CUDA) → small RAM footprint for free-tier hosts.
+fastembed==0.8.0
 qdrant-client==1.18.0
 
 # ── Scraping & transcription ──

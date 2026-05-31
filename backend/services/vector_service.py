@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
 from qdrant_client import QdrantClient
@@ -64,13 +63,64 @@ text_splitter = RecursiveCharacterTextSplitter(
     separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""],
 )
 
-# ── Embeddings (loaded once) ──
-logger.info("Loading HuggingFace Embeddings: all-MiniLM-L6-v2...")
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True},
-)
+# ── Embeddings ──
+# Two interchangeable backends (both produce 384-dim all-MiniLM-L6-v2 vectors,
+# so the Qdrant collection stays compatible either way):
+#
+#   EMBEDDINGS_BACKEND=hf   → HuggingFace Inference API (NO model in memory;
+#                             ideal for small hosts like Render's 512MB free tier)
+#   EMBEDDINGS_BACKEND=local → fastembed ONNX (offline, no API calls; default)
+#
+# Both expose the LangChain-style embed_documents / embed_query interface the
+# rest of the codebase calls.
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_BACKEND = os.getenv("EMBEDDINGS_BACKEND", "local").lower()
+
+
+class _HFInferenceEmbedder:
+    """Embeddings via the HuggingFace Inference router — zero local model memory."""
+    _URL = f"https://router.huggingface.co/hf-inference/models/{EMBED_MODEL}/pipeline/feature-extraction"
+
+    def __init__(self, token: str):
+        import requests
+        self._requests = requests
+        self._headers = {"Authorization": f"Bearer {token}"}
+
+    def _post(self, inputs):
+        resp = self._requests.post(self._URL, headers=self._headers, json={"inputs": inputs}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def embed_documents(self, texts):
+        return self._post(list(texts))
+
+    def embed_query(self, text):
+        out = self._post([text])
+        return out[0]
+
+
+class _FastEmbedWrapper:
+    """Local ONNX embeddings (fastembed) — no torch/CUDA, small footprint."""
+    def __init__(self, model_name: str = EMBED_MODEL):
+        from fastembed import TextEmbedding
+        self._model = TextEmbedding(model_name=model_name)
+
+    def embed_documents(self, texts):
+        return [vec.tolist() for vec in self._model.embed(list(texts))]
+
+    def embed_query(self, text):
+        return list(self._model.query_embed(text))[0].tolist()
+
+
+_hf_token = os.getenv("HF_API_TOKEN", "").strip()
+if _BACKEND == "hf" and _hf_token:
+    logger.info("Embeddings backend: HuggingFace Inference API (%s)", EMBED_MODEL)
+    embeddings = _HFInferenceEmbedder(_hf_token)
+else:
+    if _BACKEND == "hf" and not _hf_token:
+        logger.warning("EMBEDDINGS_BACKEND=hf but HF_API_TOKEN is missing; falling back to local fastembed.")
+    logger.info("Embeddings backend: local fastembed (%s)", EMBED_MODEL)
+    embeddings = _FastEmbedWrapper()
 
 # ── Qdrant client ──
 qdrant = QdrantClient(
