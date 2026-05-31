@@ -5,6 +5,7 @@ On register/login we set an httpOnly access_token cookie AND return the token
 in the body, so the frontend can use cookies or Authorization headers.
 """
 import logging
+import os
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
@@ -16,13 +17,21 @@ from services.email_service import send_welcome_email
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
+# In production the frontend (e.g. Vercel) and backend (e.g. Render) are on
+# different domains, so the auth cookie must be SameSite=None; Secure to be
+# sent on cross-site requests. Locally we use Lax over http.
+_IS_PROD = os.getenv("ENV", "development").lower() in ("production", "prod")
+_COOKIE_SAMESITE = "none" if _IS_PROD else "lax"
+_COOKIE_SECURE = _IS_PROD
+
 
 def _set_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite=_COOKIE_SAMESITE,
+        secure=_COOKIE_SECURE,
         max_age=JWT_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -76,5 +85,5 @@ def me(current: User = Depends(get_current_user)):
 
 @router.post("/logout")
 def logout(response: Response):
-    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("access_token", path="/", samesite=_COOKIE_SAMESITE, secure=_COOKIE_SECURE)
     return {"status": "logged_out"}

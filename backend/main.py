@@ -1,4 +1,5 @@
 import logging
+import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,8 @@ app = FastAPI(
 )
 
 # CORS — credentials enabled so the httpOnly auth cookie flows cross-origin.
+# Local dev origins by default; add your deployed frontend URL(s) via the
+# FRONTEND_ORIGINS env var (comma-separated, e.g. "https://creatorlens.vercel.app").
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -29,6 +32,8 @@ origins = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
 ]
+_extra = os.getenv("FRONTEND_ORIGINS", "")
+origins += [o.strip() for o in _extra.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
