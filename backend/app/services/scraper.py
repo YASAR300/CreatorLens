@@ -174,7 +174,7 @@ def scrape_instagram_metadata(url: str) -> Dict[str, Any]:
         
         metadata["title"] = post.caption[:60] + "..." if post.caption else f"Instagram Reel {shortcode}"
         metadata["creator"] = post.owner_username
-        metadata["views"] = post.video_view_count or 0
+        metadata["views"] = post.video_view_count or getattr(post, "video_play_count", None) or 0
         metadata["likes"] = post.likes or 0
         metadata["comments"] = post.comments or 0
         metadata["duration"] = int(post.video_duration) if post.video_duration else 0
