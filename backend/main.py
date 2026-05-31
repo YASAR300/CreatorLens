@@ -22,8 +22,8 @@ app = FastAPI(
 )
 
 # CORS — credentials enabled so the httpOnly auth cookie flows cross-origin.
-# Local dev origins by default; add your deployed frontend URL(s) via the
-# FRONTEND_ORIGINS env var (comma-separated, e.g. "https://creatorlens.vercel.app").
+# Only explicitly-allowed origins (local dev + the deployed frontend) may call
+# the API. Add/override deployed URLs via FRONTEND_ORIGINS (comma-separated).
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -31,9 +31,10 @@ origins = [
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
+    "https://creatorlens-blush.vercel.app",
 ]
 _extra = os.getenv("FRONTEND_ORIGINS", "")
-origins += [o.strip() for o in _extra.split(",") if o.strip()]
+origins += [o.strip().rstrip("/") for o in _extra.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,

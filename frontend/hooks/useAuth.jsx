@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { apiLogin, apiRegister, apiLogout, apiMe } from "../lib/api";
+import { apiLogin, apiRegister, apiLogout, apiMe, apiGoogleAuth, apiResetPassword } from "../lib/api";
 
 const AuthContext = createContext(null);
 
@@ -57,6 +57,18 @@ export function AuthProvider({ children }) {
     return res.user;
   }, [persist]);
 
+  const googleSignIn = useCallback(async (idToken) => {
+    const res = await apiGoogleAuth(idToken);
+    persist(res.user);
+    return res.user;
+  }, [persist]);
+
+  const resetPassword = useCallback(async (token, password) => {
+    const res = await apiResetPassword(token, password);
+    persist(res.user);
+    return res.user;
+  }, [persist]);
+
   const logout = useCallback(async () => {
     try { await apiLogout(); } catch { /* ignore */ }
     setUser(null);
@@ -67,7 +79,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, googleSignIn, resetPassword, logout }}>
       {children}
     </AuthContext.Provider>
   );

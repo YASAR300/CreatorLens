@@ -47,6 +47,58 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def create_reset_token(user_id: str, minutes: int = 30) -> str:
+    """Short-lived signed token for password reset (scoped with type=reset)."""
+    expire = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+    payload = {"sub": user_id, "type": "reset", "exp": expire}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_reset_token(token: str) -> Optional[str]:
+    """Return the user_id from a valid reset token, else None."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "reset":
+            return None
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+
+def verify_google_id_token(id_token: str) -> Optional[dict]:
+    """
+    Verify a Google ID token via Google's tokeninfo endpoint (no heavy deps).
+    Returns {email, name, picture, sub} on success, else None.
+    Validates the audience against GOOGLE_CLIENT_ID when configured.
+    """
+    import requests
+    try:
+        resp = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": id_token},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.warning("Google tokeninfo rejected token: %s", resp.text[:200])
+            return None
+        data = resp.json()
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+        if client_id and data.get("aud") != client_id:
+            logger.warning("Google token audience mismatch.")
+            return None
+        if data.get("email_verified") in ("false", False):
+            return None
+        return {
+            "email": data.get("email", "").lower(),
+            "name": data.get("name", "") or data.get("given_name", ""),
+            "picture": data.get("picture", ""),
+            "sub": data.get("sub", ""),
+        }
+    except Exception as exc:
+        logger.error("Google token verification failed: %s", exc)
+        return None
+
+
 def _extract_token(request: Request) -> Optional[str]:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):

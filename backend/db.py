@@ -12,6 +12,7 @@ import os
 import uuid
 import datetime
 import logging
+from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -63,7 +64,11 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), default="")
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Nullable: Google-only accounts have no local password.
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # "local" or "google" — how the account was created / can sign in.
+    auth_provider: Mapped[str] = mapped_column(String(20), default="local")
+    avatar_url: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analyses: Mapped[list["Analysis"]] = relationship(
@@ -90,9 +95,22 @@ class Analysis(Base):
 
 
 def init_db() -> None:
-    """Create tables if they don't exist. Safe to call repeatedly."""
+    """Create tables if they don't exist, and add any newly-introduced columns."""
     Base.metadata.create_all(engine)
-    logger.info("Database tables ensured (users, analyses).")
+    # Lightweight migration: add columns that may be missing on an existing table.
+    from sqlalchemy import text
+    alters = [
+        "ALTER TABLE cl_users ALTER COLUMN password_hash DROP NOT NULL",
+        "ALTER TABLE cl_users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(20) DEFAULT 'local'",
+        "ALTER TABLE cl_users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''",
+    ]
+    with engine.begin() as conn:
+        for stmt in alters:
+            try:
+                conn.execute(text(stmt))
+            except Exception as exc:
+                logger.warning("Migration step skipped (%s): %s", stmt, exc)
+    logger.info("Database tables ensured (cl_users, cl_analyses).")
 
 
 def get_db() -> Session:

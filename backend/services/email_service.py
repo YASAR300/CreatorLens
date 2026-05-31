@@ -63,3 +63,21 @@ def send_welcome_email(to_email: str, name: str = "") -> bool:
     </div>
     """
     return send_email(to_email, "Welcome to CreatorLens", html)
+
+
+def send_reset_email(to_email: str, name: str, reset_link: str) -> bool:
+    greeting = f"Hi {name}," if name else "Hi there,"
+    html = f"""
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;margin:auto;color:#1d1d1f">
+      <h2 style="font-weight:600">Reset your CreatorLens password</h2>
+      <p>{greeting}</p>
+      <p>We received a request to reset your password. Click the button below to choose a new one.
+      This link expires in 30 minutes.</p>
+      <p style="margin:24px 0">
+        <a href="{reset_link}" style="background:#5e6ad2;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:600;display:inline-block">Reset password</a>
+      </p>
+      <p style="color:#86868b;font-size:13px">If you didn't request this, you can safely ignore this email.</p>
+      <p style="color:#86868b;font-size:12px;word-break:break-all">{reset_link}</p>
+    </div>
+    """
+    return send_email(to_email, "Reset your CreatorLens password", html)

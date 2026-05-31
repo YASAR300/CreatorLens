@@ -103,6 +103,48 @@ export async function apiLogout() {
   await fetch(`${API_BASE}/api/auth/logout`, { method: "POST", credentials: "include" });
 }
 
+export async function apiGoogleAuth(idToken) {
+  const res = await fetch(`${API_BASE}/api/auth/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ id_token: idToken }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Server error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function apiForgotPassword(email) {
+  const res = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Server error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function apiResetPassword(token, password) {
+  const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ token, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `Server error ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchHistory() {
   const res = await fetch(`${API_BASE}/api/videos/history`, { credentials: "include" });
   if (!res.ok) throw new Error(`History failed: HTTP ${res.status}`);
